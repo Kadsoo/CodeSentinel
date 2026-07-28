@@ -68,7 +68,7 @@ Tasks 3, 4, 7 and 9 can use separate worktrees after Task 2 is merged. Tasks 5 a
 - Create: packages/contracts/src/id.test.ts
 - Create: .gitignore
 
-- [ ] **Step 1: Write the failing identifier contract test**
+- [x] **Step 1: Write the failing identifier contract test**
 
 ~~~ts
 import { describe, expect, it } from "vitest";
@@ -81,18 +81,18 @@ describe("createId", () => {
 });
 ~~~
 
-- [ ] **Step 2: Run the test to record the red baseline**
+- [x] **Step 2: Run the test to record the red baseline**
 
 Run: npm test -- --run packages/contracts/src/id.test.ts
 Expected: FAIL because the workspace scripts and module packages do not yet exist.
 
-- [ ] **Step 3: Add the smallest workspace configuration and identifier implementation**
+- [x] **Step 3: Add the smallest workspace configuration and identifier implementation**
 
 Use exactly Node.js 22.17.0 with its bundled npm 10.9.2. The root `package.json` is private, ESM, has `name: "codesentinel-workspace"`, `packageManager: "npm@10.9.2"`, `engines: { node: "22.17.0", npm: "10.9.2" }`, and `workspaces: ["packages/*", "apps/*"]`. Its initial scripts are exactly `test: "vitest run"`, `lint: "eslint ."`, `typecheck: "tsc --noEmit"`, `build: "tsc --noEmit"`, and `demo: "tsx scripts/mechanism-demo.ts"`. Task 12 will replace the initial build script with the WebUI build pipeline before its `npm run build` check.
 
 Install the following direct runtime dependencies with the exact values shown: `better-sqlite3@13.0.1`, `commander@15.0.0`, `diff@9.0.0`, `fastify@5.10.0`, `keytar@7.9.0`, `react@19.2.8`, `react-dom@19.2.8`, and `zod@4.4.3`. Install these exact development dependencies: `@eslint/js@10.0.1`, `@testing-library/dom@10.4.1`, `@testing-library/react@16.3.2`, `@testing-library/user-event@14.6.1`, `@types/better-sqlite3@7.6.13`, `@types/node@22.17.0`, `@types/react@19.2.17`, `@types/react-dom@19.2.3`, `@vitejs/plugin-react@6.0.4`, `eslint@10.8.0`, `jsdom@27.3.0`, `tsx@4.23.1`, `typescript@5.9.3`, `typescript-eslint@8.65.0`, `vite@8.1.5`, and `vitest@4.1.10`. Use exact entries (no version range) in package.json, run `npm install` once to generate npm lockfile version 3, and commit the generated package-lock.json. All later CI and clean-install checks use `npm ci`, never `npm install`.
 
-Create `tsconfig.json` with ESM `module` and `moduleResolution` both set to `NodeNext`, `target: "ES2022"`, `jsx: "react-jsx"`, `strict: true`, `noEmit: true`, `skipLibCheck: true`, and an include list covering `packages/**/*.ts`, `apps/**/*.ts`, `apps/**/*.tsx`, `scripts/**/*.ts`, and `tests/**/*.ts`. Create `vitest.config.ts` with the test include patterns `packages/**/*.test.ts`, `apps/**/*.test.ts`, `apps/**/*.test.tsx`, and `tests/**/*.test.ts`. Future app web tests must declare `/** @vitest-environment jsdom */` at the top of each file. Create `eslint.config.mjs` using `@eslint/js` recommended rules and `typescript-eslint` recommended rules, ignoring `node_modules`, `dist`, `coverage`, `.worktrees`, `fixtures/**/node_modules`, and generated database/log files. Set `packages/contracts/package.json` to a private ESM package named `@kadsoo/codesentinel-contracts`.
+Create `tsconfig.json` with ESM `module` and `moduleResolution` both set to `NodeNext`, `target: "ES2022"`, `jsx: "react-jsx"`, `strict: true`, `noEmit: true`, `skipLibCheck: true`, and an include list covering `packages/**/*.ts`, `apps/**/*.ts`, `apps/**/*.tsx`, `scripts/**/*.ts`, `tests/**/*.ts`, and `vitest.config.ts`. Create `vitest.config.ts` with the test include patterns `packages/**/*.test.ts`, `apps/**/*.test.ts`, `apps/**/*.test.tsx`, and `tests/**/*.test.ts`. Future app web tests must declare `/** @vitest-environment jsdom */` at the top of each file. Create `eslint.config.mjs` using `@eslint/js` recommended rules and `typescript-eslint` recommended rules, ignoring `node_modules`, `dist`, `coverage`, `.worktrees`, `fixtures/**/node_modules`, and generated database/log files. Set `packages/contracts/package.json` to a private ESM package named `@kadsoo/codesentinel-contracts`.
 
 Implement:
 
@@ -104,9 +104,9 @@ export function createId(): string {
 }
 ~~~
 
-Add a .gitignore that excludes `.worktrees/`, node_modules, dist, coverage, .env, *.db, *.sqlite, *.log, and local credential export files.
+Add a .gitignore that excludes `.worktrees/`, node_modules, dist, coverage, `.env*`, *.db, *.sqlite, *.log, and local credential export files, while allowing `!.env.example`.
 
-- [ ] **Step 4: Run the focused and whole baseline checks**
+- [x] **Step 4: Run the focused and whole baseline checks**
 
 Run: npm test -- --run packages/contracts/src/id.test.ts
 Expected: PASS.
@@ -115,14 +115,16 @@ Expected: PASS.
 Run: npm test
 Expected: PASS with one test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run:
 
 ~~~bash
-git add package.json package-lock.json tsconfig.json vitest.config.ts .gitignore packages/contracts
+git add package.json package-lock.json tsconfig.json vitest.config.ts eslint.config.mjs .gitignore packages/contracts
 git commit -m "chore: establish TypeScript test workspace"
 ~~~
+
+Completed locally: implementation commit `6e0176fb35fbadc7e39acd57888efa64c05b86a5`; reviewed and merged into main by `83cf0b1`.
 
 ### Task 2: Define and validate shared harness contracts
 

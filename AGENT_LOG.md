@@ -35,10 +35,19 @@
 - 修正：依据 npm 官方注册表与本机 Node.js 22.17.0 / npm 10.9.2，SPEC.md 和 PLAN.md 现明确精确工具链、直接依赖、npm lockfile v3、`npm ci` 和配置基线；选择 jsdom 27.3.0 与 TypeScript 5.9.3 以满足已验证的 Node/ESLint 兼容条件。
 - 后续：需由另一无上下文 Agent 复核修订后 Task 1 和 Task 2；在其通过且文档无新歧义前，不开始正式实现。
 
-## 2026-07-29T00:44:34+08:00 — COLD-002：复核通过、npm 安装环境阻塞
+## 2026-07-28 — COLD-002：复核通过、npm 安装环境阻塞
 
 - 验证 Agent：不同类型的 `gpt-5.6-terra`，无对话历史；只接收第二个可丢弃 worktree 的 SPEC.md 与 PLAN.md 绝对路径。
 - 文档结论：未发现 Task 1–2 的实现歧义；它按计划完成了 Task 1 的文件创建，初始 `npm test -- --run packages/contracts/src/id.test.ts` 得到预期 ENOENT 红灯。
 - 实际阻塞：`npm install` 两次在约两分钟后超时；后续 `npm install --ignore-scripts --no-audit --no-fund --fetch-retries=0 --fetch-timeout=20000` 的日志显示 npm 官方 registry 多个 GET 请求发生 `ECONNRESET`/`ETIMEDOUT`，并以 npm 的 `Exit handler never called!` 非零失败结束。未产生 package-lock.json 或 node_modules。
 - 范围控制：所有改动、日志和诊断均位于 `.worktrees/cold-start-validation-2`；没有主分支代码、提交、推送、真实 Provider 调用或凭据。
 - 结论与后续：规格/计划冷启动歧义已消除，但正式实现和任何“测试通过”声明必须等待 npm 安装能够完成；保留可丢弃工作树作为证据，不合并其代码。
+
+## 2026-07-28 — TASK-001：TypeScript 工作区与确定性基线
+
+- 隔离与提交：在 `feat/task-1-workspace` worktree 中完成，实施提交为 `6e0176fb35fbadc7e39acd57888efa64c05b86a5`，经两阶段审查后合并到本地 main（`83cf0b1`）；未推送远程。
+- TDD 证据：先创建 `packages/contracts/src/id.test.ts`，`npm test -- --run packages/contracts/src/id.test.ts` 因根 package.json 不存在得到预期 ENOENT 红灯；随后以最小 `randomUUID()` 实现转绿。
+- 依赖与网络：用户明确授权临时使用 `https://registry.npmmirror.com` 进行单次下载，不写入 `.npmrc` 或全局配置。安装后将 package-lock 中 349 个临时镜像 resolved URL 标准化为 `https://registry.npmjs.org/`，并以 `npm ci --offline --ignore-scripts --no-audit --no-fund` 验证 lockfile。
+- 实际检查：Node 22.17.0、npm 10.9.2、lockfile v3；聚焦 Vitest、`npm run typecheck`、全量 `npm test`、`npm run lint` 和 `git diff --check` 均通过。安装与离线 CI 有 `whatwg-encoding` 的 npm 弃用警告，但没有检查失败。
+- 审查与修正：规格审查通过；质量审查发现 Vitest 4 不支持 `environmentMatchGlobs`，已改为未来 Web 测试逐文件 `@vitest-environment jsdom` 注释，并把 vitest.config.ts 纳入类型检查。安全地扩展 `.gitignore` 为 `.env*` 且允许 `.env.example`。contracts 包的 `index.ts`/exports 按计划留给 Task 2。
+- 非阻塞观察：现有 UUID 形状断言较宽松；由于 Task 1 需保留计划中的精确测试，该增强留待后续 contracts 任务处理。
