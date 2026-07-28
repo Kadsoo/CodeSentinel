@@ -64,3 +64,11 @@
 停止原因是有效的规格歧义：Task 1 列出了依赖名，却没有说明每个精确版本、npm 版本或 lockfile 策略；在没有这些信息时选择版本属于猜测。处理时查询了 npm 官方注册表及本机工具链，确认开发基线为 Node.js 22.17.0 / npm 10.9.2；同时发现 jsdom 30 需要更高的 Node 22.22.2，故采用兼容的 jsdom 27.3.0，并选用与 `typescript-eslint@8.65.0` 兼容的 `typescript@5.9.3`。
 
 据此修订：SPEC.md 第 9 节增加精确运行时、npm 与 lockfile 原则；PLAN.md 增加依赖版本不可隐式漂移的执行不变量，并在 Task 1 写明根 package.json、精确运行时/开发依赖清单、npm lockfile v3、`npm ci` 策略、TypeScript/Vitest/ESLint 配置和 `.gitignore` 内容。该冷启动工作树中的测试文件保持可丢弃状态，不会合并到 main。修订后将以新的无上下文 Agent 再次复核 Task 1 与 Task 2。
+
+## 7. 第二次冷启动与环境阻塞证据
+
+第二个无上下文、不同类型的 `gpt-5.6-terra` Agent 只读取第二个可丢弃工作树中的 SPEC.md 与 PLAN.md。它没有发现 Task 1 或 Task 2 的实现歧义：准确创建了 Task 1 所列根清单、TypeScript/Vitest/ESLint 配置、私有 contracts 包、`.gitignore`、`id.ts` 与测试；在 `npm test -- --run packages/contracts/src/id.test.ts` 得到计划预期的初始 ENOENT 红灯后，按照精确工具链开始安装。
+
+但 `npm install` 两次在约两分钟后超时，未生成 `package-lock.json` 或 `node_modules`，因此无法运行 Task 1 的绿灯检查，也不能开始依赖 Task 1 的 Task 2。随后在同一可丢弃工作树中以 `--ignore-scripts --no-audit --no-fund` 进行受控诊断；npm 日志记录多个 npm 官方 registry GET 请求出现 `ECONNRESET` 与 `ETIMEDOUT`，最终报出 `Exit handler never called!` 并以非零状态退出。禁用脚本时同样失败，故证据不支持把问题归因于 keytar 或 better-sqlite3 的原生构建。
+
+该轮没有提交、推送、合并或调用任何真实 Provider。结论是：修订后的文档对 Task 1–2 没有新规格歧义，但当前环境到 npm registry 的批量依赖安装不稳定，阻止了必须真实通过的基线验证。保留两个忽略的冷启动工作树及其诊断日志作为过程证据；正式实现应在 `npm install` 成功并生成锁文件后恢复，不能虚报测试通过。

@@ -34,3 +34,11 @@
 - 发现：Task 1 没有锁定依赖版本、npm 版本和 lockfile 策略，冷启动 Agent 按规则停止而未猜测。
 - 修正：依据 npm 官方注册表与本机 Node.js 22.17.0 / npm 10.9.2，SPEC.md 和 PLAN.md 现明确精确工具链、直接依赖、npm lockfile v3、`npm ci` 和配置基线；选择 jsdom 27.3.0 与 TypeScript 5.9.3 以满足已验证的 Node/ESLint 兼容条件。
 - 后续：需由另一无上下文 Agent 复核修订后 Task 1 和 Task 2；在其通过且文档无新歧义前，不开始正式实现。
+
+## 2026-07-29T00:44:34+08:00 — COLD-002：复核通过、npm 安装环境阻塞
+
+- 验证 Agent：不同类型的 `gpt-5.6-terra`，无对话历史；只接收第二个可丢弃 worktree 的 SPEC.md 与 PLAN.md 绝对路径。
+- 文档结论：未发现 Task 1–2 的实现歧义；它按计划完成了 Task 1 的文件创建，初始 `npm test -- --run packages/contracts/src/id.test.ts` 得到预期 ENOENT 红灯。
+- 实际阻塞：`npm install` 两次在约两分钟后超时；后续 `npm install --ignore-scripts --no-audit --no-fund --fetch-retries=0 --fetch-timeout=20000` 的日志显示 npm 官方 registry 多个 GET 请求发生 `ECONNRESET`/`ETIMEDOUT`，并以 npm 的 `Exit handler never called!` 非零失败结束。未产生 package-lock.json 或 node_modules。
+- 范围控制：所有改动、日志和诊断均位于 `.worktrees/cold-start-validation-2`；没有主分支代码、提交、推送、真实 Provider 调用或凭据。
+- 结论与后续：规格/计划冷启动歧义已消除，但正式实现和任何“测试通过”声明必须等待 npm 安装能够完成；保留可丢弃工作树作为证据，不合并其代码。
