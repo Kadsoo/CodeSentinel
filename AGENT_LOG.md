@@ -59,3 +59,12 @@
 - 契约范围：定义严格的七类受控动作、任务种类、策略决定、会话状态、结构化验证命令和无 SQLite 依赖的事件接口；未知字段、任意 shell 动作、空白路径和错误命令形状均被拒绝。
 - 一致性与审查修正：共享标识符会去除首尾空白，以保证 verification action 的 `commandId` 与配置 ID 一致；语义性字符串（如路径、查询）保持原样。重复命令 ID 会定位到重复项的嵌套字段。
 - 实际检查：聚焦 contracts 测试 12/12、全量测试 13/13、`npm run typecheck`、`npm run lint` 和 `git diff --check` 均通过；最终质量复核未发现 Critical、Important 或 Minor 问题。
+
+## 2026-07-28 — TASK-003：默认拒绝策略护栏
+
+- 隔离与提交：在 `feat/task-3-policy-guardrail` worktree 中完成，最终实施提交为 `25ad4254f8b82c9dee11daacd7b0bde4f3519d13`；多轮规格和质量复核均通过后合并到本地 main（`4221c6c`），未推送远程。
+- TDD 证据：先创建 guardrail 测试，`npm test -- --run packages/policy/src/guardrail.test.ts` 因 `guardrail.js` 不存在而得到预期红灯；每个后续安全回归均先以失败测试复现，再进行最小修复。
+- 安全范围：实现冻结的五种理由码、显式路径白名单、敏感/二进制/凭据路径拒绝、Windows 和 POSIX 路径差异、规范路径快照的失败关闭复检，以及在 Task 4 前持续拒绝 `apply_approved_patch`。
+- 命令策略：验证命令不再因“已配置”自动放行；只允许精确的包管理器测试/受限脚本数组，拒绝安装、更新、卸载、发布、Git、shell、网络/fetch runner、可执行文件路径伪装、NUL、命令链及任何尾随参数。
+- 复核修正：修复 Unicode 非 BMP glob 匹配、过长路径/模式的有界拒绝、Windows 保留设备和尾随别名、驼峰凭据名、规范目标二次检查、工作区根末尾分隔符及 `--prefix`/`--script-shell` 参数逃逸。实时 realpath/junction/TOCTOU 复检仍明确留给 Task 5 工具层。
+- 实际检查：聚焦策略测试 35/35、全量测试 4 文件/48 测试、`npm run typecheck`、`npm run lint` 和 `git diff --check` 均通过。最终规格复核为 COMPLIANT；最终质量复核未发现 Critical、Important 或 Minor 问题。

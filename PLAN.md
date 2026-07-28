@@ -209,7 +209,7 @@ Completed locally: implementation commit `cf79de6d1cd5557c312e2c377eb1cf7f63d1ef
 - Create: packages/policy/src/index.ts
 - Create: packages/policy/src/guardrail.test.ts
 
-- [ ] **Step 1: Write failing guardrail tests**
+- [x] **Step 1: Write failing guardrail tests**
 
 ~~~ts
 import { describe, expect, it } from "vitest";
@@ -248,23 +248,23 @@ describe("evaluateAction", () => {
 });
 ~~~
 
-- [ ] **Step 2: Run the guardrail test to record red**
+- [x] **Step 2: Run the guardrail test to record red**
 
 Run: npm test -- --run packages/policy/src/guardrail.test.ts
 Expected: FAIL because evaluateAction is missing.
 
-- [ ] **Step 3: Implement default-deny policy**
+- [x] **Step 3: Implement default-deny policy**
 
 Implement path normalization that rejects absolute foreign paths, parent traversal, symlink escape, .env, .git, node_modules, binary extensions and configured sensitive patterns. Allow only configured verification command ids, and only when executable and args exactly match config. Return immutable decision objects with reason codes SENSITIVE_PATH, OUTSIDE_WORKSPACE, UNKNOWN_COMMAND, PATCH_REQUIRES_APPROVAL or ALLOWED. Export a Policy interface with evaluate(action, context), and createPolicy(context) as the adapter used by the core loop; evaluateAction remains the pure function used by unit tests.
 
-- [ ] **Step 4: Verify policy behavior**
+- [x] **Step 4: Verify policy behavior**
 
 Run: npm test -- --run packages/policy/src/guardrail.test.ts
 Expected: PASS.
 Run: npm test
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run:
 
@@ -272,6 +272,8 @@ Run:
 git add packages/policy
 git commit -m "feat: add default-deny action guardrail"
 ~~~
+
+Completed locally: implementation commit `25ad4254f8b82c9dee11daacd7b0bde4f3519d13`; final specification and quality reviews passed, then merged into main by `4221c6c`.
 
 ### Task 4: Implement the patch approval state machine
 
