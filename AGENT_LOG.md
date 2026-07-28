@@ -75,3 +75,12 @@
 - 根因：Task 3 新增 `packages/policy` workspace 后，`package-lock.json` 仍只有 contracts workspace link；干净安装无法从根 lockfile 解析 policy package。
 - 修正：使用离线、仅 lockfile 的 `npm install --package-lock-only --offline --ignore-scripts --no-audit --no-fund` 补齐 `node_modules/@kadsoo/codesentinel-policy` link 与 `packages/policy` package 条目，未改变第三方依赖版本或 registry URL。
 - 验证：修正后离线 `npm ci` 成功安装 292 个包；全量测试 4 文件/48 测试、`npm run typecheck`、`npm run lint` 和 `git diff --check` 均通过。npm 仍显示已有的 `whatwg-encoding` 弃用警告，但无检查失败。
+
+## 2026-07-28 — TASK-004：补丁审批状态机
+
+- 隔离与提交：在 `feat/task-4-approval-state` worktree 中完成，最终实施提交为 `0924c0dd12e697e6233bc941ea657a044aa9aa66`；独立规格/安全复核和最终质量复核通过后合并到本地 main（`b719d31`），未推送远程。
+- TDD 证据：先运行 approval 聚焦测试，因 `approval.js` 不存在得到预期红灯；后续针对随机默认 ID、`now < createdAt` 和缺少当前基线的兼容拒绝调用均先写失败测试再修复。
+- 状态语义：审批记录保留 id、actionId、patchHash、baseHash、createdAt、expiresAt 和有限状态。只有 pending 可转为 approved、rejected 或 expired；基线变化、无效时间、创建前时间和到期时间均失败关闭为 expired，任何终态都不可重新批准。
+- API 边界：三参数兼容工厂使用显式的非授权确定性 sentinel 身份；生产调用需提供可信 metadata。两参数 `rejectPatch` 兼容形式在无法验证当前基线时失败关闭为 expired，只有带当前基线的形式能产生 rejected。所有转换返回新的冻结记录，不修改输入。
+- 后续约束：该状态对象不是独立写入授权。Task 5 必须从可信状态解析 approval/action，并再次核验目标路径、精确补丁哈希、基线哈希、过期和一次性使用。
+- 实际检查：聚焦 approval 测试 14/14、全量测试 5 文件/62 测试、`npm run typecheck`、`npm run lint` 和 `git diff --check` 均通过；最终质量复核未发现 Critical、Important 或 Minor 问题。

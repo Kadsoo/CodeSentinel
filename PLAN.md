@@ -284,7 +284,7 @@ Completed locally: implementation commit `25ad4254f8b82c9dee11daacd7b0bde4f3519d
 - Create: packages/policy/src/approval.test.ts
 - Modify: packages/policy/src/index.ts
 
-- [ ] **Step 1: Write failing approval tests**
+- [x] **Step 1: Write failing approval tests**
 
 ~~~ts
 import { describe, expect, it } from "vitest";
@@ -303,21 +303,21 @@ describe("approval state machine", () => {
 });
 ~~~
 
-- [ ] **Step 2: Run the approval test to record red**
+- [x] **Step 2: Run the approval test to record red**
 
 Run: npm test -- --run packages/policy/src/approval.test.ts
 Expected: FAIL because approval functions are missing.
 
-- [ ] **Step 3: Implement pending, approved, rejected and expired transitions**
+- [x] **Step 3: Implement pending, approved, rejected and expired transitions**
 
 Represent an approval as actionId, patchHash, baseHash, status, createdAt and expiresAt. Permit only pending to approved, pending to rejected, and pending to expired transitions. Ensure an expired or rejected approval cannot later become approved.
 
-- [ ] **Step 4: Verify transitions**
+- [x] **Step 4: Verify transitions**
 
 Run: npm test -- --run packages/policy/src/approval.test.ts
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run:
 
@@ -325,6 +325,8 @@ Run:
 git add packages/policy/src/approval.ts packages/policy/src/approval.test.ts packages/policy/src/index.ts
 git commit -m "feat: bind patch writes to approval state"
 ~~~
+
+Completed locally: implementation commit `0924c0dd12e697e6233bc941ea657a044aa9aa66`; final specification and quality reviews passed, then merged into main by `b719d31`.
 
 ### Task 5: Add controlled workspace reads, searches and patch application
 
