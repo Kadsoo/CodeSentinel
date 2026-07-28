@@ -51,3 +51,11 @@
 - 实际检查：Node 22.17.0、npm 10.9.2、lockfile v3；聚焦 Vitest、`npm run typecheck`、全量 `npm test`、`npm run lint` 和 `git diff --check` 均通过。安装与离线 CI 有 `whatwg-encoding` 的 npm 弃用警告，但没有检查失败。
 - 审查与修正：规格审查通过；质量审查发现 Vitest 4 不支持 `environmentMatchGlobs`，已改为未来 Web 测试逐文件 `@vitest-environment jsdom` 注释，并把 vitest.config.ts 纳入类型检查。安全地扩展 `.gitignore` 为 `.env*` 且允许 `.env.example`。contracts 包的 `index.ts`/exports 按计划留给 Task 2。
 - 非阻塞观察：现有 UUID 形状断言较宽松；由于 Task 1 需保留计划中的精确测试，该增强留待后续 contracts 任务处理。
+
+## 2026-07-28 — TASK-002：共享 Harness 契约
+
+- 隔离与提交：在 `feat/task-2-contracts` worktree 中完成，实施提交为 `cf79de6d1cd5557c312e2c377eb1cf7f63d1efa5`；规格复核和最终质量复核均通过后，合并到本地 main（`2ea211b`），未推送远程。
+- TDD 证据：先执行聚焦 contracts 测试，因 `ActionSchema` 与 `CodeSentinelConfigSchema` 尚不存在而得到预期红灯；随后以最小 Zod 契约实现转绿。
+- 契约范围：定义严格的七类受控动作、任务种类、策略决定、会话状态、结构化验证命令和无 SQLite 依赖的事件接口；未知字段、任意 shell 动作、空白路径和错误命令形状均被拒绝。
+- 一致性与审查修正：共享标识符会去除首尾空白，以保证 verification action 的 `commandId` 与配置 ID 一致；语义性字符串（如路径、查询）保持原样。重复命令 ID 会定位到重复项的嵌套字段。
+- 实际检查：聚焦 contracts 测试 12/12、全量测试 13/13、`npm run typecheck`、`npm run lint` 和 `git diff --check` 均通过；最终质量复核未发现 Critical、Important 或 Minor 问题。

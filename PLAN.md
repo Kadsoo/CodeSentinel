@@ -138,7 +138,7 @@ Completed locally: implementation commit `6e0176fb35fbadc7e39acd57888efa64c05b86
 - Create: packages/contracts/src/action.test.ts
 - Create: packages/contracts/src/config.test.ts
 
-- [ ] **Step 1: Write failing schema tests**
+- [x] **Step 1: Write failing schema tests**
 
 ~~~ts
 import { describe, expect, it } from "vitest";
@@ -170,23 +170,23 @@ describe("CodeSentinelConfigSchema", () => {
 });
 ~~~
 
-- [ ] **Step 2: Run the focused tests to record red**
+- [x] **Step 2: Run the focused tests to record red**
 
 Run: npm test -- --run packages/contracts/src/action.test.ts packages/contracts/src/config.test.ts
 Expected: FAIL because ActionSchema and CodeSentinelConfigSchema do not exist.
 
-- [ ] **Step 3: Implement the exact domain contracts**
+- [x] **Step 3: Implement the exact domain contracts**
 
 Define Zod discriminated-union actions: list_files, read_file, search_text, propose_patch, apply_approved_patch, run_verification and finish. Define TaskKind as test_repair or feature_implementation; PolicyDecision as allow, ask or deny; SessionState as created, running, awaiting_approval, completed, blocked, failed or stopped. Define configuration verification commands as id, executable, args, timeoutMs and maxOutputBytes. In events.ts define EventSink with append(event): Promise<void>, so core can emit events without depending on SQLite. Export all public types only through index.ts.
 
-- [ ] **Step 4: Run contract checks**
+- [x] **Step 4: Run contract checks**
 
 Run: npm test -- --run packages/contracts/src/action.test.ts packages/contracts/src/config.test.ts
 Expected: PASS.
 Run: npm run typecheck
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run:
 
@@ -194,6 +194,8 @@ Run:
 git add packages/contracts
 git commit -m "feat: define validated harness contracts"
 ~~~
+
+Completed locally: implementation commit `cf79de6d1cd5557c312e2c377eb1cf7f63d1efa5`; specification and final quality reviews passed, then merged into main by `2ea211b`.
 
 ### Task 3: Implement deterministic path and command policy decisions
 
