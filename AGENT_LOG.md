@@ -68,3 +68,10 @@
 - 命令策略：验证命令不再因“已配置”自动放行；只允许精确的包管理器测试/受限脚本数组，拒绝安装、更新、卸载、发布、Git、shell、网络/fetch runner、可执行文件路径伪装、NUL、命令链及任何尾随参数。
 - 复核修正：修复 Unicode 非 BMP glob 匹配、过长路径/模式的有界拒绝、Windows 保留设备和尾随别名、驼峰凭据名、规范目标二次检查、工作区根末尾分隔符及 `--prefix`/`--script-shell` 参数逃逸。实时 realpath/junction/TOCTOU 复检仍明确留给 Task 5 工具层。
 - 实际检查：聚焦策略测试 35/35、全量测试 4 文件/48 测试、`npm run typecheck`、`npm run lint` 和 `git diff --check` 均通过。最终规格复核为 COMPLIANT；最终质量复核未发现 Critical、Important 或 Minor 问题。
+
+## 2026-07-28 — LOCK-001：policy workspace lockfile 同步
+
+- 触发：Task 4 隔离工作树执行 `npm ci --offline --ignore-scripts --no-audit --no-fund` 时稳定失败，提示 `Missing: @kadsoo/codesentinel-policy@ from lock file`。
+- 根因：Task 3 新增 `packages/policy` workspace 后，`package-lock.json` 仍只有 contracts workspace link；干净安装无法从根 lockfile 解析 policy package。
+- 修正：使用离线、仅 lockfile 的 `npm install --package-lock-only --offline --ignore-scripts --no-audit --no-fund` 补齐 `node_modules/@kadsoo/codesentinel-policy` link 与 `packages/policy` package 条目，未改变第三方依赖版本或 registry URL。
+- 验证：修正后离线 `npm ci` 成功安装 292 个包；全量测试 4 文件/48 测试、`npm run typecheck`、`npm run lint` 和 `git diff --check` 均通过。npm 仍显示已有的 `whatwg-encoding` 弃用警告，但无检查失败。
