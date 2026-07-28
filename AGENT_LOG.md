@@ -25,3 +25,12 @@
 - 输出：根目录 PLAN.md 与 docs/superpowers/plans/2026-07-28-codesentinel-implementation.md。计划含 13 个任务、依赖图、每项失败测试、绿灯检查、提交边界及冷启动协议。
 - 人工干预：无；尚未写任何实现代码、安装依赖、运行产品测试或调用真实 Provider。
 - 自检：已检查功能规约覆盖、任务依赖、类型名一致性及无模糊占位语；冷启动验证仍是进入实现前的硬门。
+
+## 2026-07-28T23:48:04+08:00 — COLD-001：隔离冷启动验证与文档修订
+
+- 触发技能：using-git-worktrees；为隔离创建了被 `.gitignore` 忽略的 `.worktrees/cold-start-validation`，其分支不合并。
+- 验证 Agent：不同类型的 `codex-auto-review`，无本次对话历史；仅接收该工作树中的 SPEC.md 和 PLAN.md 绝对路径。
+- 实际产物与检查：它仅新建 `packages/contracts/src/id.test.ts`，运行 `npm test -- --run packages/contracts/src/id.test.ts`；因根 package.json 尚不存在而得到预期 ENOENT 失败，未进行 Task 2、未提交、未调用网络或真实 Provider。
+- 发现：Task 1 没有锁定依赖版本、npm 版本和 lockfile 策略，冷启动 Agent 按规则停止而未猜测。
+- 修正：依据 npm 官方注册表与本机 Node.js 22.17.0 / npm 10.9.2，SPEC.md 和 PLAN.md 现明确精确工具链、直接依赖、npm lockfile v3、`npm ci` 和配置基线；选择 jsdom 27.3.0 与 TypeScript 5.9.3 以满足已验证的 Node/ESLint 兼容条件。
+- 后续：需由另一无上下文 Agent 复核修订后 Task 1 和 Task 2；在其通过且文档无新歧义前，不开始正式实现。

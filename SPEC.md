@@ -187,7 +187,7 @@ ScriptedMockProvider 按预设 Action 返回响应。机制演示必须稳定复
 
 ## 9. 技术选型、凭据、分发与部署
 
-- **语言/运行时**：TypeScript + Node.js 22；当前开发环境已安装 Node.js，适合结构化 Action、跨包类型共享和本地 CLI。
+- **语言/运行时**：TypeScript + Node.js 22.17.0 + npm 10.9.2；根清单声明这两个精确版本和 `packageManager: "npm@10.9.2"`，提交 npm 生成的 `package-lock.json`，使 Windows x64 的安装与 CI 可复现。所有直接依赖的精确版本与配置细节以 PLAN.md 的 Task 1 为准。
 - **本地 WebUI**：React + TypeScript + Vite；仅连接本机 API，便于展示 diff 和审批。
 - **本地存储**：SQLite；适合单机离线会话记录。
 - **凭据**：Windows Credential Manager；首版目标平台为 Windows x64，使用系统凭据抽象实现录入、状态、更新和清除。

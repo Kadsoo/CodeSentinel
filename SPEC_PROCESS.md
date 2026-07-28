@@ -54,3 +54,13 @@
 ## 5. 书面规格批准与计划生成
 
 项目所有者明确回复“批准 SPEC”。随后依据已批准的规格生成根目录 PLAN.md：它将实现拆分为 13 个可独立验证的任务，明确文件路径、依赖、先失败后通过的测试、提交边界、并行关系和冷启动协议。计划尚未进入实现；下一步必须由不同 Agent 类型在没有本次对话历史的情况下，仅凭 SPEC.md 与 PLAN.md 尝试 Task 1 和 Task 2。
+
+## 6. 冷启动验证、发现与修订
+
+为满足隔离要求，先在主检出中仅加入 `.worktrees/` 忽略规则并提交；随后创建未合并的 `cold-start-validation` 分支和 `.worktrees/cold-start-validation` 一次性工作树。不同类型的 `codex-auto-review` Agent 没有本次对话历史，只获得该工作树中 `SPEC.md` 与 `PLAN.md` 的绝对路径，且被明确限制不得读取 AGENT_LOG、课程文档或仓库历史。
+
+它在 Task 1 的 Step 1 成功创建了计划规定的 `packages/contracts/src/id.test.ts`，并执行 `npm test -- --run packages/contracts/src/id.test.ts`。该命令按预期失败：根目录尚不存在 `package.json`（ENOENT）；npm 还报告无法向用户缓存目录写日志。它在 Step 3 前停止，没有尝试 Task 2、没有提交，也没有改动任何其他工作树。
+
+停止原因是有效的规格歧义：Task 1 列出了依赖名，却没有说明每个精确版本、npm 版本或 lockfile 策略；在没有这些信息时选择版本属于猜测。处理时查询了 npm 官方注册表及本机工具链，确认开发基线为 Node.js 22.17.0 / npm 10.9.2；同时发现 jsdom 30 需要更高的 Node 22.22.2，故采用兼容的 jsdom 27.3.0，并选用与 `typescript-eslint@8.65.0` 兼容的 `typescript@5.9.3`。
+
+据此修订：SPEC.md 第 9 节增加精确运行时、npm 与 lockfile 原则；PLAN.md 增加依赖版本不可隐式漂移的执行不变量，并在 Task 1 写明根 package.json、精确运行时/开发依赖清单、npm lockfile v3、`npm ci` 策略、TypeScript/Vitest/ESLint 配置和 `.gitignore` 内容。该冷启动工作树中的测试文件保持可丢弃状态，不会合并到 main。修订后将以新的无上下文 Agent 再次复核 Task 1 与 Task 2。

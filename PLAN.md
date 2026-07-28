@@ -16,6 +16,7 @@
 - Write the named failing test before each behavior change; record the red result before writing the minimum implementation.
 - Run commands without a shell. Never construct a shell string from an LLM action.
 - Do not add an action or tool beyond the actions defined in SPEC.md.
+- Pin every direct npm dependency to the exact version named in Task 1 (no `^` or `~`) and commit the npm-generated package-lock.json; only a documented plan revision may change that baseline.
 - Update PLAN.md with the completed task and its commit hash immediately after every merged task.
 - Each implementation task gets a separate worktree, branch, pull request, spec-compliance review, and code-quality review.
 
@@ -58,8 +59,10 @@ Tasks 3, 4, 7 and 9 can use separate worktrees after Task 2 is merged. Tasks 5 a
 
 **Files:**
 - Create: package.json
+- Create: package-lock.json
 - Create: tsconfig.json
 - Create: vitest.config.ts
+- Create: eslint.config.mjs
 - Create: packages/contracts/package.json
 - Create: packages/contracts/src/id.ts
 - Create: packages/contracts/src/id.test.ts
@@ -85,7 +88,13 @@ Expected: FAIL because the workspace scripts and module packages do not yet exis
 
 - [ ] **Step 3: Add the smallest workspace configuration and identifier implementation**
 
-Create a root npm workspace with scripts named test, lint, typecheck, build and demo. Install TypeScript, Vitest, Zod, Fastify, React, Vite, diff, better-sqlite3, keytar, commander, jsdom, @testing-library/react, @testing-library/user-event and their required type packages. Configure ESM TypeScript with NodeNext module resolution and a Vitest include pattern covering packages and apps; use the jsdom environment for files under apps/web. Implement:
+Use exactly Node.js 22.17.0 with its bundled npm 10.9.2. The root `package.json` is private, ESM, has `name: "codesentinel-workspace"`, `packageManager: "npm@10.9.2"`, `engines: { node: "22.17.0", npm: "10.9.2" }`, and `workspaces: ["packages/*", "apps/*"]`. Its initial scripts are exactly `test: "vitest run"`, `lint: "eslint ."`, `typecheck: "tsc --noEmit"`, `build: "tsc --noEmit"`, and `demo: "tsx scripts/mechanism-demo.ts"`. Task 12 will replace the initial build script with the WebUI build pipeline before its `npm run build` check.
+
+Install the following direct runtime dependencies with the exact values shown: `better-sqlite3@13.0.1`, `commander@15.0.0`, `diff@9.0.0`, `fastify@5.10.0`, `keytar@7.9.0`, `react@19.2.8`, `react-dom@19.2.8`, and `zod@4.4.3`. Install these exact development dependencies: `@eslint/js@10.0.1`, `@testing-library/dom@10.4.1`, `@testing-library/react@16.3.2`, `@testing-library/user-event@14.6.1`, `@types/better-sqlite3@7.6.13`, `@types/node@22.17.0`, `@types/react@19.2.17`, `@types/react-dom@19.2.3`, `@vitejs/plugin-react@6.0.4`, `eslint@10.8.0`, `jsdom@27.3.0`, `tsx@4.23.1`, `typescript@5.9.3`, `typescript-eslint@8.65.0`, `vite@8.1.5`, and `vitest@4.1.10`. Use exact entries (no version range) in package.json, run `npm install` once to generate npm lockfile version 3, and commit the generated package-lock.json. All later CI and clean-install checks use `npm ci`, never `npm install`.
+
+Create `tsconfig.json` with ESM `module` and `moduleResolution` both set to `NodeNext`, `target: "ES2022"`, `jsx: "react-jsx"`, `strict: true`, `noEmit: true`, `skipLibCheck: true`, and an include list covering `packages/**/*.ts`, `apps/**/*.ts`, `apps/**/*.tsx`, `scripts/**/*.ts`, and `tests/**/*.ts`. Create `vitest.config.ts` with the test include patterns `packages/**/*.test.ts`, `apps/**/*.test.ts`, `apps/**/*.test.tsx`, and `tests/**/*.test.ts`, plus `environmentMatchGlobs: [["apps/web/**", "jsdom"]]`. Create `eslint.config.mjs` using `@eslint/js` recommended rules and `typescript-eslint` recommended rules, ignoring `node_modules`, `dist`, `coverage`, `.worktrees`, `fixtures/**/node_modules`, and generated database/log files. Set `packages/contracts/package.json` to a private ESM package named `@kadsoo/codesentinel-contracts`.
+
+Implement:
 
 ~~~ts
 import { randomUUID } from "node:crypto";
@@ -95,7 +104,7 @@ export function createId(): string {
 }
 ~~~
 
-Add a .gitignore that excludes node_modules, dist, coverage, .env, *.db, *.sqlite, *.log, and local credential export files.
+Add a .gitignore that excludes `.worktrees/`, node_modules, dist, coverage, .env, *.db, *.sqlite, *.log, and local credential export files.
 
 - [ ] **Step 4: Run the focused and whole baseline checks**
 
@@ -795,7 +804,7 @@ Expected: FAIL because App and API components are missing.
 
 - [ ] **Step 3: Implement the minimum review-first UI**
 
-Define a typed WebApiClient with loadSession, createSession, approvePatch, rejectPatch and stopSession methods. Render a task form for workspace path, task kind and configured command; a timeline of action/policy/test events; a read-only unified diff; explicit Approve patch, Reject patch and Stop session buttons; and terminal state summaries. Disable approval controls unless session state is awaiting_approval. Use only the local API client and never access filesystem APIs in browser code.
+Set `apps/web/package.json` to a private ESM workspace named `@kadsoo/codesentinel-web`, with `build: "vite build"` and exact local dependency declarations for `react@19.2.8`, `react-dom@19.2.8`, `vite@8.1.5`, and `@vitejs/plugin-react@6.0.4`. Create `apps/web/vite.config.ts` with the React plugin. Replace the root `build` script with `npm run typecheck && npm --workspace @kadsoo/codesentinel-web run build` before Step 4. Define a typed WebApiClient with loadSession, createSession, approvePatch, rejectPatch and stopSession methods. Render a task form for workspace path, task kind and configured command; a timeline of action/policy/test events; a read-only unified diff; explicit Approve patch, Reject patch and Stop session buttons; and terminal state summaries. Disable approval controls unless session state is awaiting_approval. Use only the local API client and never access filesystem APIs in browser code.
 
 - [ ] **Step 4: Verify the UI**
 
