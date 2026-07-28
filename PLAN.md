@@ -92,7 +92,7 @@ Use exactly Node.js 22.17.0 with its bundled npm 10.9.2. The root `package.json`
 
 Install the following direct runtime dependencies with the exact values shown: `better-sqlite3@13.0.1`, `commander@15.0.0`, `diff@9.0.0`, `fastify@5.10.0`, `keytar@7.9.0`, `react@19.2.8`, `react-dom@19.2.8`, and `zod@4.4.3`. Install these exact development dependencies: `@eslint/js@10.0.1`, `@testing-library/dom@10.4.1`, `@testing-library/react@16.3.2`, `@testing-library/user-event@14.6.1`, `@types/better-sqlite3@7.6.13`, `@types/node@22.17.0`, `@types/react@19.2.17`, `@types/react-dom@19.2.3`, `@vitejs/plugin-react@6.0.4`, `eslint@10.8.0`, `jsdom@27.3.0`, `tsx@4.23.1`, `typescript@5.9.3`, `typescript-eslint@8.65.0`, `vite@8.1.5`, and `vitest@4.1.10`. Use exact entries (no version range) in package.json, run `npm install` once to generate npm lockfile version 3, and commit the generated package-lock.json. All later CI and clean-install checks use `npm ci`, never `npm install`.
 
-Create `tsconfig.json` with ESM `module` and `moduleResolution` both set to `NodeNext`, `target: "ES2022"`, `jsx: "react-jsx"`, `strict: true`, `noEmit: true`, `skipLibCheck: true`, and an include list covering `packages/**/*.ts`, `apps/**/*.ts`, `apps/**/*.tsx`, `scripts/**/*.ts`, and `tests/**/*.ts`. Create `vitest.config.ts` with the test include patterns `packages/**/*.test.ts`, `apps/**/*.test.ts`, `apps/**/*.test.tsx`, and `tests/**/*.test.ts`, plus `environmentMatchGlobs: [["apps/web/**", "jsdom"]]`. Create `eslint.config.mjs` using `@eslint/js` recommended rules and `typescript-eslint` recommended rules, ignoring `node_modules`, `dist`, `coverage`, `.worktrees`, `fixtures/**/node_modules`, and generated database/log files. Set `packages/contracts/package.json` to a private ESM package named `@kadsoo/codesentinel-contracts`.
+Create `tsconfig.json` with ESM `module` and `moduleResolution` both set to `NodeNext`, `target: "ES2022"`, `jsx: "react-jsx"`, `strict: true`, `noEmit: true`, `skipLibCheck: true`, and an include list covering `packages/**/*.ts`, `apps/**/*.ts`, `apps/**/*.tsx`, `scripts/**/*.ts`, and `tests/**/*.ts`. Create `vitest.config.ts` with the test include patterns `packages/**/*.test.ts`, `apps/**/*.test.ts`, `apps/**/*.test.tsx`, and `tests/**/*.test.ts`. Future app web tests must declare `/** @vitest-environment jsdom */` at the top of each file. Create `eslint.config.mjs` using `@eslint/js` recommended rules and `typescript-eslint` recommended rules, ignoring `node_modules`, `dist`, `coverage`, `.worktrees`, `fixtures/**/node_modules`, and generated database/log files. Set `packages/contracts/package.json` to a private ESM package named `@kadsoo/codesentinel-contracts`.
 
 Implement:
 
@@ -778,6 +778,7 @@ git commit -m "test: demonstrate guarded repair feedback loop"
 - [ ] **Step 1: Write the failing approval UI test**
 
 ~~~tsx
+/** @vitest-environment jsdom */
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
