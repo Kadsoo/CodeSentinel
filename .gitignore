@@ -1,1 +1,11 @@
 .worktrees/
+node_modules/
+dist/
+coverage/
+.env*
+!.env.example
+*.db
+*.sqlite
+*.log
+credentials*.json
+.credentials/
