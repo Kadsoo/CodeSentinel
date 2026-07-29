@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { VerificationCommand } from "../../contracts/src/index.js";
+import { ActionSchema, type VerificationCommand } from "../../contracts/src/index.js";
 import { createPolicy, evaluateAction } from "./guardrail.js";
 
 const baseHash = "a".repeat(64);
@@ -58,7 +58,7 @@ describe("evaluateAction", () => {
     });
   });
 
-  it("allows an action only when its command id exactly matches a trusted configuration", () => {
+  it("normalizes valid command ids before matching a trusted configuration", () => {
     const commandContext = {
       ...context,
       config: {
@@ -72,16 +72,36 @@ describe("evaluateAction", () => {
     ).toEqual({ decision: "allow", reason: "ALLOWED" });
     expect(
       evaluateAction({ kind: "run_verification", commandId: " test " }, commandContext),
-    ).toEqual({ decision: "deny", reason: "UNKNOWN_COMMAND" });
+    ).toEqual({ decision: "allow", reason: "ALLOWED" });
+    expect(
+      evaluateAction(
+        ActionSchema.parse({ kind: "run_verification", commandId: " test " }),
+        commandContext,
+      ),
+    ).toEqual({ decision: "allow", reason: "ALLOWED" });
+  });
+
+  it("denies malformed command ids instead of normalizing control characters", () => {
+    const commandContext = {
+      ...context,
+      config: {
+        ...context.config,
+        verificationCommands: [trustedCommand],
+      },
+    };
+
+    for (const commandId of ["test\0", "test\n", "test\u007f", " ".repeat(129)]) {
+      expect(evaluateAction({ kind: "run_verification", commandId }, commandContext)).toEqual({
+        decision: "deny",
+        reason: "UNKNOWN_COMMAND",
+      });
+    }
   });
 
   it("denies a legacy executable configuration even when its id matches", () => {
     const legacyCommand = {
-      id: "test",
+      ...trustedCommand,
       executable: "npm.cmd",
-      args: ["test"],
-      timeoutMs: 1_000,
-      maxOutputBytes: 1_024,
     } as unknown as VerificationCommand;
 
     expect(

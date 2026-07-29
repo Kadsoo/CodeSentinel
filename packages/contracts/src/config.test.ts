@@ -39,14 +39,22 @@ describe("CodeSentinelConfigSchema", () => {
     }
   });
 
-  it("rejects legacy executable and Windows command-wrapper configuration", () => {
+  it("rejects legacy executable and Windows command-wrapper fields alongside a trusted launcher", () => {
     for (const executable of ["npm", "npm.cmd", "npm.bat", "cmd.exe"]) {
       expect(
         CodeSentinelConfigSchema.safeParse({
-          verificationCommands: [{ ...trustedCommand, executable, launcher: undefined }],
+          verificationCommands: [{ ...trustedCommand, executable }],
         }).success,
       ).toBe(false);
     }
+  });
+
+  it("requires the explicit trusted npm CLI launcher", () => {
+    expect(
+      CodeSentinelConfigSchema.safeParse({
+        verificationCommands: [{ ...trustedCommand, launcher: undefined }],
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects arguments and budgets outside the trusted runner grammar", () => {
