@@ -10,8 +10,59 @@ describe("ActionSchema", () => {
         baseHash: "a".repeat(64),
         patch: "@@ -1 +1 @@\n-export const add = () => 0;\n+export const add = () => 2;",
         reason: "Fix incorrect addition",
+        stage: "repair",
       }).kind,
     ).toBe("propose_patch");
+  });
+
+  it("rejects a patch proposal without a stage", () => {
+    expect(() =>
+      ActionSchema.parse({
+        kind: "propose_patch",
+        path: "src/math.ts",
+        baseHash: "a".repeat(64),
+        patch: "@@ -1 +1 @@\n-export const add = () => 0;\n+export const add = () => 2;",
+        reason: "Fix incorrect addition",
+      }),
+    ).toThrow();
+  });
+
+  it("accepts each supported patch proposal stage", () => {
+    for (const stage of ["repair", "test", "implementation"]) {
+      expect(
+        ActionSchema.safeParse({
+          kind: "propose_patch",
+          path: "src/math.ts",
+          baseHash: "a".repeat(64),
+          patch: "@@ -1 +1 @@\n-export const add = () => 0;\n+export const add = () => 2;",
+          reason: "Fix incorrect addition",
+          stage,
+        }).success,
+      ).toBe(true);
+    }
+  });
+
+  it("rejects an unsupported patch proposal stage", () => {
+    expect(
+      ActionSchema.safeParse({
+        kind: "propose_patch",
+        path: "src/math.ts",
+        baseHash: "a".repeat(64),
+        patch: "@@ -1 +1 @@\n-export const add = () => 0;\n+export const add = () => 2;",
+        reason: "Fix incorrect addition",
+        stage: "publish",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects file listings deeper than eight levels", () => {
+    expect(ActionSchema.safeParse({ kind: "list_files", depth: 9 }).success).toBe(false);
+  });
+
+  it("rejects text searches returning more than 100 matches", () => {
+    expect(
+      ActionSchema.safeParse({ kind: "search_text", query: "TODO", maxResults: 101 }).success,
+    ).toBe(false);
   });
 
   it("rejects an arbitrary shell field", () => {
