@@ -13,6 +13,20 @@ function patch(path: string) {
 }
 
 describe("PendingPatchStore", () => {
+  it("rejects a createdAt that cannot retain the full approval TTL inside the Date range", () => {
+    const store = new PendingPatchStore();
+
+    expect(() =>
+      store.create({
+        sessionId: "session-1",
+        approvalId: "approval-1",
+        actionId: "action-1",
+        now: 8_640_000_000_000_000,
+        action: patch("src/math.ts"),
+      }),
+    ).toThrow("TOOL_FAILED");
+  });
+
   it("keeps session and approval identifiers as an unambiguous pair", () => {
     const store = new PendingPatchStore();
     const first = store.create({

@@ -1,9 +1,13 @@
 import { ActionSchema, type Action, type HarnessEvent } from "../../contracts/src/index.js";
-import type { GuardrailDecision } from "../../policy/src/index.js";
+import {
+  approvePatch,
+  rejectPatch,
+  type GuardrailDecision,
+} from "../../policy/src/index.js";
 import { MAX_PATCH_BYTES } from "../../tools/src/index.js";
 import { buildProviderRequest, sanitizeProviderFeedback, type ProviderFeedback } from "./context.js";
 import { CodeSentinelCoreError } from "./errors.js";
-import { PendingPatchStore } from "./pending-patch-store.js";
+import { PENDING_PATCH_TTL_MS, PendingPatchStore } from "./pending-patch-store.js";
 import type {
   AgentLoopDependencies,
   AgentSession,
@@ -50,6 +54,7 @@ const MAX_TOOL_FEEDBACK_FIELD_CHARACTERS = 240;
 const MAX_PENDING_SESSIONS = 32;
 const MAX_SESSION_IDENTIFIER_CHARACTERS = 128;
 const MAX_SESSION_TEXT_CHARACTERS = 4_096;
+const MAX_DATE_TIMESTAMP_MS = 8_640_000_000_000_000;
 const utf8Encoder = new TextEncoder();
 
 export function createAgentSessionController(
@@ -90,17 +95,122 @@ export function createAgentSessionController(
       throw new CodeSentinelCoreError("APPROVAL_NOT_FOUND");
     }
 
+    const claimed = pendingPatches.claim(input.sessionId, input.approvalId);
     const record = sessions.get(input.sessionId);
     if (
       record === undefined ||
       record.session.state !== "awaiting_approval" ||
-      record.pendingApprovalId !== input.approvalId ||
-      pendingPatches.getView(input.sessionId, input.approvalId) === undefined
+      record.pendingApprovalId !== input.approvalId
     ) {
       throw new CodeSentinelCoreError("APPROVAL_NOT_FOUND");
     }
+    record.pendingApprovalId = undefined;
 
-    throw new CodeSentinelCoreError("APPROVAL_NOT_FOUND");
+    let currentBaseHash: string;
+    try {
+      currentBaseHash = await dependencies.tools.getCurrentBaseHash(claimed.action.path);
+    } catch {
+      return terminal(record, "failed", "TOOL_FAILED");
+    }
+    if (!isSha256Hash(currentBaseHash)) {
+      return terminal(record, "failed", "TOOL_FAILED");
+    }
+
+    let now: number;
+    try {
+      now = dependencies.now();
+    } catch {
+      return terminalWithoutEvent(record, "failed", "TOOL_FAILED");
+    }
+    if (!isSafeDateTimestamp(now)) {
+      return terminalWithoutEvent(record, "failed", "TOOL_FAILED");
+    }
+
+    const approval =
+      input.decision === "approve"
+        ? approvePatch(claimed.approval, currentBaseHash, now)
+        : rejectPatch(claimed.approval, currentBaseHash, now);
+    if (approval.status === "expired") {
+      const summary =
+        currentBaseHash === claimed.approval.baseHash
+          ? "APPROVAL_EXPIRED"
+          : "APPROVAL_BASE_CHANGED";
+      return stopResolvedApproval(record, summary);
+    }
+    if (approval.status === "rejected") {
+      return stopResolvedApproval(record, "APPROVAL_REJECTED");
+    }
+    if (approval.status !== "approved") {
+      return terminal(record, "failed", "TOOL_FAILED");
+    }
+
+    if (!(await appendEvent(record, "approval", "APPROVAL_APPROVED"))) {
+      return eventSinkFailure(record);
+    }
+
+    try {
+      await dependencies.tools.applyApprovedPatch({
+        path: claimed.action.path,
+        patch: claimed.action.patch,
+        approval,
+      });
+    } catch {
+      return terminal(record, "failed", "TOOL_FAILED");
+    }
+    if (!(await appendEvent(record, "tool_result", "PATCH_APPLIED"))) {
+      return eventSinkFailure(record);
+    }
+
+    return verifyApprovedPatch(record);
+  }
+
+  async function stopResolvedApproval(
+    record: SessionRecord,
+    summary: "APPROVAL_REJECTED" | "APPROVAL_EXPIRED" | "APPROVAL_BASE_CHANGED",
+  ): Promise<AgentSessionResult> {
+    if (!(await appendEvent(record, "approval", summary))) {
+      return eventSinkFailure(record);
+    }
+    return terminal(record, "stopped", summary);
+  }
+
+  async function verifyApprovedPatch(record: SessionRecord): Promise<AgentSessionResult> {
+    let value: unknown;
+    try {
+      value = await dependencies.tools.runVerification({
+        kind: "run_verification",
+        commandId: record.session.verificationCommandId,
+      });
+    } catch {
+      return terminal(record, "failed", "TOOL_FAILED");
+    }
+
+    const verification = readVerification(value, record.session.verificationCommandId);
+    const summary = verification === undefined ? "TOOL_FAILED" : verification.summary;
+    if (!(await appendEvent(record, "verification", summary))) {
+      return eventSinkFailure(record);
+    }
+    if (
+      verification === undefined ||
+      verification.status !== "completed" ||
+      verification.exitCode === null
+    ) {
+      return terminal(record, "failed", "TOOL_FAILED");
+    }
+    if (verification.exitCode === 0) {
+      return terminal(record, "completed", "VERIFICATION_PASSED");
+    }
+
+    record.feedback.push(Object.freeze({ kind: "verification", summary: verification.summary }));
+    if (record.session.round >= 3) {
+      return terminal(record, "failed", "ROUND_LIMIT_REACHED");
+    }
+
+    setState(record, "running");
+    if (!(await appendEvent(record, "state", "RUNNING"))) {
+      return eventSinkFailure(record);
+    }
+    return runProviderFeedbackCycles(record);
   }
 
   async function runInitialRepairVerification(record: SessionRecord): Promise<AgentSessionResult> {
@@ -238,7 +348,10 @@ export function createAgentSessionController(
       const actionId = dependencies.createId();
       const approvalId = dependencies.createId();
       const now = dependencies.now();
-      if (!Number.isFinite(now)) {
+      if (!isSafeDateTimestamp(now)) {
+        return terminalWithoutEvent(record, "failed", "TOOL_FAILED");
+      }
+      if (!isValidPendingPatchTimestamp(now)) {
         return terminal(record, "failed", "TOOL_FAILED");
       }
       view = pendingPatches.create({
@@ -354,6 +467,17 @@ export function createAgentSessionController(
     if (!(await appendEvent(record, "state", summary))) {
       return eventSinkFailure(record);
     }
+    const result = snapshot(record, summary);
+    releaseTerminalRecord(record);
+    return result;
+  }
+
+  function terminalWithoutEvent(
+    record: SessionRecord,
+    state: AgentSession["state"],
+    summary: string,
+  ): AgentSessionResult {
+    setState(record, state);
     const result = snapshot(record, summary);
     releaseTerminalRecord(record);
     return result;
@@ -742,11 +866,35 @@ function isPatchWithinByteLimit(patch: string): boolean {
   return utf8ByteLengthWithin(patch, MAX_PATCH_BYTES) !== undefined;
 }
 
+function isSha256Hash(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
+}
+
+function isSafeDateTimestamp(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    Math.abs(value) <= MAX_DATE_TIMESTAMP_MS
+  );
+}
+
+function isValidPendingPatchTimestamp(value: number): boolean {
+  return value <= MAX_DATE_TIMESTAMP_MS - PENDING_PATCH_TTL_MS;
+}
+
 function isResolveInput(value: unknown): value is ResolvePendingPatchInput {
   try {
     const input = asRecord(value);
+    const keys = input === undefined ? [] : Reflect.ownKeys(input);
     return (
       input !== undefined &&
+      (Object.getPrototypeOf(input) === Object.prototype || Object.getPrototypeOf(input) === null) &&
+      keys.length === 3 &&
+      keys.every(
+        (key) =>
+          typeof key === "string" &&
+          (key === "sessionId" || key === "approvalId" || key === "decision"),
+      ) &&
       requiredText(input, "sessionId", MAX_SESSION_IDENTIFIER_CHARACTERS) !== undefined &&
       requiredText(input, "approvalId", MAX_SESSION_IDENTIFIER_CHARACTERS) !== undefined &&
       (ownValue(input, "decision") === "approve" || ownValue(input, "decision") === "reject")

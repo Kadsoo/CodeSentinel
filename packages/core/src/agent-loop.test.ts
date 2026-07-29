@@ -774,10 +774,16 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
   });
 
   it("fails closed at the pending capacity without evicting existing approvals", async () => {
+    let verificationCalls = 0;
     const provider = new ScriptedMockProvider(
-      Array.from({ length: 33 }, () => repairPatch()),
+      Array.from({ length: 34 }, () => repairPatch()),
     );
-    const fake = fakeTools({ verification: failedVerification });
+    const fake = fakeTools({
+      runVerification: async () => {
+        verificationCalls += 1;
+        return verificationCalls === 34 ? passingVerification : failedVerification;
+      },
+    });
     const controller = createController(provider, fake.tools, { policy: askForPatchPolicy });
     const firstSession = { ...createdRepairSession(), id: "pending-session-1" };
     const first = await controller.runAgentSession({ session: firstSession });
@@ -798,15 +804,19 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(overflow.session.state).toBe("failed");
     expect(overflow.finalSummary).toBe("PENDING_CAPACITY_REACHED");
     expect(duplicate.finalSummary).toBe("INVALID_SESSION_INPUT");
-    await expect(
-      controller.resolvePendingPatch({
-        sessionId: firstSession.id,
-        approvalId: first.pendingPatch?.approvalId ?? "missing",
-        decision: "approve",
-      }),
-    ).rejects.toMatchObject({ code: "APPROVAL_NOT_FOUND" });
-    expect(provider.requests).toHaveLength(33);
-    expect(fake.applyApprovedPatch).not.toHaveBeenCalled();
+    const resolved = await controller.resolvePendingPatch({
+      sessionId: firstSession.id,
+      approvalId: first.pendingPatch?.approvalId ?? "missing",
+      decision: "approve",
+    });
+    const replacement = await controller.runAgentSession({
+      session: { ...createdRepairSession(), id: "pending-session-34" },
+    });
+
+    expect(resolved.finalSummary).toBe("VERIFICATION_PASSED");
+    expect(replacement.session.state).toBe("awaiting_approval");
+    expect(provider.requests).toHaveLength(34);
+    expect(fake.applyApprovedPatch).toHaveBeenCalledOnce();
   });
 
   it("releases a terminal session record after its immutable result is returned", async () => {
@@ -909,19 +919,4 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(Object.isFrozen(result.events[0])).toBe(true);
   });
 
-  it("fails closed when Task 5 approval recovery has not yet been implemented", async () => {
-    const provider = new ScriptedMockProvider([repairPatch()]);
-    const fake = fakeTools({ verification: failedVerification });
-    const controller = createController(provider, fake.tools, { policy: askForPatchPolicy });
-    const pending = await controller.runAgentSession({ session: createdRepairSession() });
-
-    await expect(
-      controller.resolvePendingPatch({
-        sessionId: pending.session.id,
-        approvalId: pending.pendingPatch?.approvalId ?? "missing",
-        decision: "approve",
-      }),
-    ).rejects.toMatchObject({ code: "APPROVAL_NOT_FOUND" });
-    expect(fake.applyApprovedPatch).not.toHaveBeenCalled();
-  });
 });
