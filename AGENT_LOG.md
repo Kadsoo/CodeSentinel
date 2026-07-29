@@ -84,3 +84,12 @@
 - API 边界：三参数兼容工厂使用显式的非授权确定性 sentinel 身份；生产调用需提供可信 metadata。两参数 `rejectPatch` 兼容形式在无法验证当前基线时失败关闭为 expired，只有带当前基线的形式能产生 rejected。所有转换返回新的冻结记录，不修改输入。
 - 后续约束：该状态对象不是独立写入授权。Task 5 必须从可信状态解析 approval/action，并再次核验目标路径、精确补丁哈希、基线哈希、过期和一次性使用。
 - 实际检查：聚焦 approval 测试 14/14、全量测试 5 文件/62 测试、`npm run typecheck`、`npm run lint` 和 `git diff --check` 均通过；最终质量复核未发现 Critical、Important 或 Minor 问题。
+
+## 2026-07-28 — TASK-005：受控工作区读取与补丁写入
+
+- 隔离与提交：在 `feat/task-5-tools` worktree 中完成，最终实施提交为 `9e7f32c83aa79beead9fe2ca820ced13071987fd`；多轮独立规格/安全复核和质量复核通过后合并到本地 main（`eb39829`），未拉取远程、未推送 GitHub。
+- TDD 证据：先记录缺少工具模块导致的预期红灯；后续每项安全回归均先复现失败，再做最小修复，包括危险路径/硬链接、未绑定审批 sentinel、冲突或被忽略的 diff 头尾、hunk 重定位与重叠、重复 no-newline marker、大小限制、临时文件身份，以及初始读取后和临时文件创建后的权限漂移。
+- 工具边界：`readWorkspaceFile` 只返回有界 UTF-8 文本，拒绝工作区逃逸、符号链接、硬链接、非普通文件、二进制和危险 Windows 路径别名。`applyApprovedPatch` 只接受严格的单文件 unified diff；写入前机械校验 approved 状态、拒绝 unbound sentinel、校验时间、精确 UTF-8 patch hash 与当前原始字节 base hash，并以同目录临时文件、身份/内容哈希/mode 快照复验后原子替换。
+- 权限与审批边界：该层仅验证调用者给出的 approval 记录在机械上匹配，不证明其来自人工批准，也不承担 Task 3 policy allowlist 的执行。后续 Task 8/9 必须由受控 dispatcher 与权威存储绑定 action、路径、会话、过期和一次性消费。普通 POSIX `mode & 0o777` 会被保留；不声称保留 ACL、owner、ADS 或 xattr。
+- 实际检查：最终实施分支全量 `npm test` 为 8 文件、83 通过、3 个已记录的平台跳过；`npm run typecheck`、`npm run lint` 和 `git diff --check` 均通过。合并后的 main 再次运行全量测试，同为 83 通过、3 跳过，类型检查、lint 和 merge diff 检查均通过。
+- 保留边界：便携式 `fs/promises` 无法完全消除最终复验到 `rename` 之间的 OS 级 TOCTOU；Windows junction/reparse 直接竞态回归仍建议在具备权限的环境补充。实现明确记录这些限制，未将其表述为已解决。

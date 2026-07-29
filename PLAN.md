@@ -340,7 +340,7 @@ Completed locally: implementation commit `0924c0dd12e697e6233bc941ea657a044aa9aa
 - Create: packages/tools/src/patch.test.ts
 - Create: packages/tools/src/index.ts
 
-- [ ] **Step 1: Write failing workspace and patch tests**
+- [x] **Step 1: Write failing workspace and patch tests**
 
 ~~~ts
 import { mkdtemp, writeFile } from "node:fs/promises";
@@ -369,21 +369,21 @@ it("does not write when approval is rejected", async () => {
 });
 ~~~
 
-- [ ] **Step 2: Run focused tests to record red**
+- [x] **Step 2: Run focused tests to record red**
 
 Run: npm test -- --run packages/tools/src/workspace.test.ts packages/tools/src/patch.test.ts
 Expected: FAIL because tool modules are missing.
 
-- [ ] **Step 3: Implement safe tools**
+- [x] **Step 3: Implement safe tools**
 
 Expose readWorkspaceFile({ workspaceRoot, path, maxBytes }) and applyApprovedPatch({ workspaceRoot, path, patch, approval }). Use Node fs/promises and realpath checks to resolve reads under the selected workspace. Enforce a file-size limit before reading and return a truncated marker when necessary. Apply a single-file unified diff only after policy and approval verification; re-hash current file content and reject a changed base hash before writing. Use the diff package to apply the patch, then atomically replace only the approved file.
 
-- [ ] **Step 4: Verify safe tool behavior**
+- [x] **Step 4: Verify safe tool behavior**
 
 Run: npm test -- --run packages/tools/src/workspace.test.ts packages/tools/src/patch.test.ts
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run:
 
@@ -391,6 +391,8 @@ Run:
 git add packages/tools
 git commit -m "feat: add guarded workspace and patch tools"
 ~~~
+
+Completed locally: implementation commit `9e7f32c83aa79beead9fe2ca820ced13071987fd`; independent specification/security and quality reviews passed, then merged into main by `eb39829`.
 
 ### Task 6: Add the configured verification runner
 
