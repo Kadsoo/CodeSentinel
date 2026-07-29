@@ -4,6 +4,14 @@ import { createPolicy, evaluateAction } from "./guardrail.js";
 
 const baseHash = "a".repeat(64);
 
+const trustedCommand: VerificationCommand = {
+  id: "test",
+  launcher: "node_npm_cli",
+  args: ["test"],
+  timeoutMs: 1_000,
+  maxOutputBytes: 1_024,
+};
+
 const context = {
   workspaceRoot: "C:/repo",
   config: {
@@ -50,26 +58,38 @@ describe("evaluateAction", () => {
     });
   });
 
-  it("allows only a configured verification command id", () => {
+  it("allows an action only when its command id exactly matches a trusted configuration", () => {
     const commandContext = {
       ...context,
       config: {
         ...context.config,
-        verificationCommands: [
-          {
-            id: "test",
-            executable: "npm",
-            args: ["test"],
-            timeoutMs: 30_000,
-            maxOutputBytes: 1_000_000,
-          },
-        ],
+        verificationCommands: [trustedCommand],
       },
     };
 
     expect(
-      evaluateAction({ kind: "run_verification", commandId: " test " }, commandContext),
+      evaluateAction({ kind: "run_verification", commandId: "test" }, commandContext),
     ).toEqual({ decision: "allow", reason: "ALLOWED" });
+    expect(
+      evaluateAction({ kind: "run_verification", commandId: " test " }, commandContext),
+    ).toEqual({ decision: "deny", reason: "UNKNOWN_COMMAND" });
+  });
+
+  it("denies a legacy executable configuration even when its id matches", () => {
+    const legacyCommand = {
+      id: "test",
+      executable: "npm.cmd",
+      args: ["test"],
+      timeoutMs: 1_000,
+      maxOutputBytes: 1_024,
+    } as unknown as VerificationCommand;
+
+    expect(
+      evaluateAction(
+        { kind: "run_verification", commandId: "test" },
+        { ...context, config: { ...context.config, verificationCommands: [legacyCommand] } },
+      ),
+    ).toEqual({ decision: "deny", reason: "UNKNOWN_COMMAND" });
   });
 
   it("denies configured verification entries that could execute dangerous commands", () => {
@@ -400,7 +420,7 @@ describe("evaluateAction", () => {
             timeoutMs: 30_000,
             maxOutputBytes: 1_000_000,
           },
-        ],
+        ] as unknown as VerificationCommand[],
       },
     };
 
@@ -459,45 +479,20 @@ describe("evaluateAction", () => {
     }
   });
 
-  it("allows only exact configured package-manager test and script commands", () => {
+  it("allows only exact configured trusted npm launcher commands", () => {
     const commandContext = {
       ...context,
       config: {
         ...context.config,
         verificationCommands: [
-          {
-            id: "test",
-            executable: "npm",
-            args: ["test"],
-            timeoutMs: 30_000,
-            maxOutputBytes: 1_000_000,
-          },
-          {
-            id: "t",
-            executable: "npm",
-            args: ["t"],
-            timeoutMs: 30_000,
-            maxOutputBytes: 1_000_000,
-          },
-          {
-            id: "lint",
-            executable: "npm",
-            args: ["run", "lint"],
-            timeoutMs: 30_000,
-            maxOutputBytes: 1_000_000,
-          },
-          {
-            id: "lint-run-script",
-            executable: "npm",
-            args: ["run-script", "lint"],
-            timeoutMs: 30_000,
-            maxOutputBytes: 1_000_000,
-          },
+          trustedCommand,
+          { ...trustedCommand, id: "lint", args: ["run", "lint"] as const },
+          { ...trustedCommand, id: "lint-run-script", args: ["run-script", "lint"] as const },
         ],
       },
     };
 
-    for (const commandId of ["test", "t", "lint", "lint-run-script"]) {
+    for (const commandId of ["test", "lint", "lint-run-script"]) {
       expect(evaluateAction({ kind: "run_verification", commandId }, commandContext)).toEqual({
         decision: "allow",
         reason: "ALLOWED",
@@ -506,17 +501,15 @@ describe("evaluateAction", () => {
   });
 
   it("fails closed on duplicate verification command ids", () => {
-    const safeTestCommand = {
-      id: "test",
-      executable: "npm",
-      args: ["test"],
-      timeoutMs: 30_000,
-      maxOutputBytes: 1_000_000,
-    };
+    const safeTestCommand = trustedCommand;
+    const invalidLauncherCommand = {
+      ...safeTestCommand,
+      launcher: "unknown",
+    } as unknown as VerificationCommand;
 
     for (const verificationCommands of [
       [safeTestCommand, { ...safeTestCommand }],
-      [safeTestCommand, { ...safeTestCommand, args: ["publish"] }],
+      [safeTestCommand, invalidLauncherCommand],
     ]) {
       expect(
         evaluateAction(
@@ -544,13 +537,7 @@ describe("evaluateAction", () => {
           config: {
             ...context.config,
             verificationCommands: [
-              {
-                id: "test",
-                executable: "npm",
-                args: ["test"],
-                timeoutMs: 30_000,
-                maxOutputBytes: 1_000_000,
-              },
+              trustedCommand,
               malformedCommand,
             ],
           },

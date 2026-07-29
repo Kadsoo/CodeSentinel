@@ -43,10 +43,10 @@ describe("ActionSchema", () => {
       verificationCommands: [
         {
           id: " test ",
-          executable: "npm",
+          launcher: "node_npm_cli",
           args: ["test"],
           timeoutMs: 30_000,
-          maxOutputBytes: 1_000_000,
+          maxOutputBytes: 65_536,
         },
       ],
     });
