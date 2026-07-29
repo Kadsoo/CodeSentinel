@@ -102,3 +102,12 @@
 - 输出安全：分别处理 stdout/stderr，固定顺序汇总；对终端控制序列、Cc/Cf、JSON/环境变量形式和常见 token/secret 进行有界脱敏。未知或未完成的终端序列、未闭合 JSON 或悬空敏感赋值会保守返回安全摘要。实现不把 npm script 当作 sandbox，也只尽力终止直接 child。
 - 实际检查：最终 focused runner 测试 77/77；跨包回归 131/131；合并前全量 `npm test` 为 167 通过、3 个平台跳过；`npm run typecheck`、`npm run lint` 和 diff 检查通过。合并后的 `main` 再次运行 `npm test`，为 9 文件通过、167 通过、3 跳过。
 - 保留边界：信任本机 Node/npm 安装，不能消除本地管理员替换或 OS 级 TOCTOU；不保证终止子孙进程，也不提供 OS 级隔离。Task 8 仍必须使用同一配置快照完成 Action/Policy/workspace 授权。
+
+## 2026-07-29 — TASK-007：Provider 与 Windows 凭据抽象
+
+- 实现与集成：在隔离分支 `feat/task-7-providers` 完成 Provider contract、确定性 Mock、受限 OpenAI-compatible transport、测试内存凭据与注入式 Windows Credential Manager port。GitHub PR #1 已以普通 merge commit `fc2c29864a41cafe08fc674f2555bb15468a3348` 合并到 `main`。
+- TDD 与加固：先记录缺少模块的红灯；后续针对 Mock 快照、transport 超时/延迟响应清理、内存 Map 与 Keytar port 的运行时私有性、畸形 Keytar 返回值，以及 Provider 构造参数 throwing getter 分别新增红绿回归。
+- 安全边界：没有静态或动态加载 `keytar`，没有 `.env`、环境变量、文件、SQLite、日志或明文回退；不读取真实 Key、不在测试中调用真实 Provider 或 Windows Credential Manager；不为 HTTP endpoint 添加例外。
+- 审查：独立规格、安全与质量审查先后提出并验证修复运行时私有字段、注入端口返回契约和构造参数错误泄露；最终复审均为 COMPLIANT。Mock 对恶意 Proxy 的反射副作用仍保守地作为测试输入边界。
+- 实际验证：Feature 分支和 GitHub 合并后的本地 `main` 均运行 `npm test`（12 文件、264 通过、3 跳过）、`npm run typecheck`、`npm run lint` 与 diff 检查并通过。
+- 发布：远程 `main` 与 `feat/task-7-providers` 已推送；PR #1 当前已合并。未推送或记录任何真实 Provider/凭据秘密。
