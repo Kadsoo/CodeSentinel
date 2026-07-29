@@ -17,3 +17,15 @@ export {
   PROVIDER_REQUEST_TIMEOUT_MS,
 } from "./openai-compatible.js";
 export type { FetchLike, OpenAICompatibleProviderOptions } from "./openai-compatible.js";
+export {
+  CODESENTINEL_CREDENTIAL_SERVICE,
+  CredentialStoreError,
+  InMemoryCredentialStore,
+  WindowsCredentialStore,
+} from "./credential-store.js";
+export type {
+  CredentialStatus,
+  CredentialStore,
+  CredentialStoreErrorCode,
+  KeytarLike,
+} from "./credential-store.js";
