@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { PassThrough } from "node:stream";
 import {
   VerificationCommandSchema,
   type VerificationCommand,
@@ -9,6 +11,11 @@ import {
 
 const launcherResolution = vi.hoisted(() => ({
   unavailable: false,
+}));
+
+const spawnHarness = vi.hoisted(() => ({
+  calls: [] as Array<Readonly<{ command: unknown; args: unknown; options: unknown }>>,
+  nextChild: undefined as unknown,
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -30,6 +37,27 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const observedSpawn = ((...args: unknown[]) => {
+    spawnHarness.calls.push({
+      command: args[0],
+      args: args[1],
+      options: args[2],
+    });
+
+    if (spawnHarness.nextChild !== undefined) {
+      const child = spawnHarness.nextChild;
+      spawnHarness.nextChild = undefined;
+      return child;
+    }
+
+    return Reflect.apply(actual.spawn, undefined, args);
+  }) as typeof actual.spawn;
+
+  return { ...actual, spawn: observedSpawn };
+});
+
 import { runVerification } from "./verification.js";
 
 const npmTestCommand: VerificationCommand = {
@@ -44,6 +72,8 @@ const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
   launcherResolution.unavailable = false;
+  spawnHarness.calls.length = 0;
+  spawnHarness.nextChild = undefined;
   await Promise.all(
     [...temporaryDirectories].map((directory) => rm(directory, { recursive: true, force: true })),
   );
@@ -79,6 +109,44 @@ async function withPackageFixture<T>(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+type FakeChild = EventEmitter & {
+  stderr: PassThrough;
+  stdout: PassThrough;
+  killed: boolean;
+  kill: () => boolean;
+};
+
+function createFakeChild(): FakeChild {
+  const child = new EventEmitter() as FakeChild;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+    return true;
+  };
+  return child;
+}
+
+async function waitForSpawnCount(expectedCount: number): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (spawnHarness.calls.length < expectedCount) {
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for the runner to invoke spawn.");
+    }
+    await delay(1);
+  }
+}
+
+function emitStreamError(stream: PassThrough, message: string): boolean {
+  try {
+    stream.emit("error", new Error(message));
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 describe("runVerification", () => {
@@ -152,6 +220,25 @@ describe("runVerification", () => {
         expect(result.summary).not.toContain("x".repeat(32));
         expect(result.summary).not.toContain("y".repeat(32));
         expect(result.summary).not.toContain("boundary-secret");
+      },
+    );
+  });
+
+  it("applies the output limit jointly to stdout and stderr", async () => {
+    await withPackageFixture(
+      'process.stdout.write("o".repeat(600)); process.stderr.write("e".repeat(600));',
+      async (cwd) => {
+        const result = await runVerification({
+          command: { ...npmTestCommand, maxOutputBytes: 1_024 },
+          cwd,
+        });
+
+        expect(result).toMatchObject({
+          status: "output_limit",
+          exitCode: null,
+          timedOut: false,
+          summary: "VERIFICATION_OUTPUT_LIMIT",
+        });
       },
     );
   });
@@ -241,6 +328,83 @@ describe("runVerification", () => {
     }
   });
 
+  it("uses exactly canonical Node/npm arguments, fixed no-shell options, and a stripped environment", async () => {
+    const inheritedNames = [
+      "NODE_OPTIONS",
+      "npm_config_registry",
+      "HTTPS_PROXY",
+      "CODE_SENTINEL_TEST_TOKEN",
+      "API_KEY",
+    ] as const;
+    const inheritedValues = new Map(inheritedNames.map((name) => [name, process.env[name]]));
+    const originalPath = process.env.PATH;
+    process.env.PATH = "untrusted-parent-path";
+    for (const name of inheritedNames) {
+      process.env[name] = `parent-${name}`;
+    }
+
+    try {
+      await withPackageFixture('process.stdout.write("observed");', async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+        const [call] = spawnHarness.calls;
+        const canonicalNode = await realpath(process.execPath);
+        const canonicalNpmCli = await realpath(
+          join(dirname(canonicalNode), "node_modules", "npm", "bin", "npm-cli.js"),
+        );
+        const options = call?.options as
+          | {
+              cwd?: unknown;
+              detached?: unknown;
+              env?: NodeJS.ProcessEnv;
+              shell?: unknown;
+              stdio?: unknown;
+              windowsHide?: unknown;
+              windowsVerbatimArguments?: unknown;
+            }
+          | undefined;
+        const environment = options?.env;
+
+        expect(result.status).toBe("completed");
+        expect(spawnHarness.calls).toHaveLength(1);
+        expect(call?.command).toBe(canonicalNode);
+        expect(call?.args).toEqual([canonicalNpmCli, "test"]);
+        expect(options).toMatchObject({
+          cwd: await realpath(cwd),
+          shell: false,
+          windowsHide: true,
+          windowsVerbatimArguments: false,
+          detached: false,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        expect(environment?.PATH).toBe(dirname(canonicalNode));
+        expect(environment?.PATH).not.toBe("untrusted-parent-path");
+        expect(environment).not.toHaveProperty("Path");
+        for (const name of inheritedNames) {
+          expect(environment).not.toHaveProperty(name);
+        }
+        expect(
+          Object.keys(environment ?? {}).every((name) =>
+            ["PATH", "SystemRoot", "ComSpec", "TEMP", "TMP"].includes(name),
+          ),
+        ).toBe(true);
+      });
+    } finally {
+      if (originalPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = originalPath;
+      }
+      for (const name of inheritedNames) {
+        const value = inheritedValues.get(name);
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
+      }
+    }
+  });
+
   it("redacts common secret forms from completed stdout and stderr", async () => {
     await withPackageFixture(
       [
@@ -261,6 +425,54 @@ describe("runVerification", () => {
           expect(result.summary).not.toContain(secret);
         }
         expect(result.summary).toContain("[REDACTED]");
+      },
+    );
+  });
+
+  it("normalizes C0, DEL, and C1 controls before redacting split and camel-case secret keys", async () => {
+    await withPackageFixture(
+      [
+        "const nul = String.fromCharCode(0);",
+        "const lineFeed = String.fromCharCode(10);",
+        "const escape = String.fromCharCode(27);",
+        "const del = String.fromCharCode(0x7f);",
+        "const c1Csi = String.fromCharCode(0x9b);",
+        "const c1Osc = String.fromCharCode(0x9d);",
+        'process.stdout.write([`pass${nul}word=alpha-nul-leak`, `api_key${nul}=bravo-nul-leak`, `secret${lineFeed}Key=charlie-newline-leak`, `db${escape}[31mPassword=delta-ansi-leak`, `api${c1Csi}Key=echo-c1-leak`, `access${del}Token=foxtrot-del-token-leak`, `authToken=golf-auth-token-leak`, `clientSecret=hotel-client-secret-leak`, `password=india${lineFeed}value-tail-leak`, `p${nul}a${nul}ss${nul}word=juliet-fragment-leak`, `apiK${nul}ey=kilo-fragment-leak`, `Be${nul}arer lima-bearer-fragment-leak`, `sk-${nul}mike-openai-fragment-leak`, `${c1Osc}window-title${lineFeed}plain`, "ordinary-output-tail"].join("|"));',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        for (const secret of [
+          "alpha-nul-leak",
+          "bravo-nul-leak",
+          "charlie-newline-leak",
+          "delta-ansi-leak",
+          "echo-c1-leak",
+          "foxtrot-del-token-leak",
+          "golf-auth-token-leak",
+          "hotel-client-secret-leak",
+          "indiavalue-tail-leak",
+          "value-tail-leak",
+          "juliet-fragment-leak",
+          "kilo-fragment-leak",
+          "lima-bearer-fragment-leak",
+          "mike-openai-fragment-leak",
+        ]) {
+          expect(result.summary).not.toContain(secret);
+        }
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(result.summary).not.toContain("\u2063");
+        expect(
+          [...result.summary].some((character) => {
+            const codePoint = character.codePointAt(0);
+            return (
+              codePoint !== undefined &&
+              (codePoint <= 31 || codePoint === 127 || (codePoint >= 128 && codePoint <= 159))
+            );
+          }),
+        ).toBe(false);
       },
     );
   });
@@ -321,6 +533,106 @@ describe("runVerification", () => {
 
       expect(result.status).toBe("completed");
       expect(result.summary.length).toBeLessThanOrEqual(4_096);
+    });
+  });
+
+  it("keeps a spawn failure stable when the child later closes", async () => {
+    await withPackageFixture('process.stdout.write("unused");', async (cwd) => {
+      const child = createFakeChild();
+      spawnHarness.nextChild = child;
+      const completion = runVerification({ command: npmTestCommand, cwd });
+
+      await waitForSpawnCount(1);
+      child.emit("error", new Error("spawn raw host detail"));
+      child.emit("close", 0);
+
+      await expect(completion).resolves.toMatchObject({
+        status: "spawn_failed",
+        exitCode: null,
+        timedOut: false,
+        summary: "VERIFICATION_SPAWN_FAILED",
+      });
+    });
+  });
+
+  it("handles stdout and stderr errors once without raw host details", async () => {
+    await withPackageFixture('process.stdout.write("unused");', async (cwd) => {
+      let expectedSpawnCount = 0;
+      for (const streamName of ["stdout", "stderr"] as const) {
+        const child = createFakeChild();
+        spawnHarness.nextChild = child;
+        const completion = runVerification({ command: npmTestCommand, cwd });
+
+        expectedSpawnCount += 1;
+        await waitForSpawnCount(expectedSpawnCount);
+        const firstErrorWasUnhandled = emitStreamError(
+          child[streamName],
+          `${streamName} first raw host detail`,
+        );
+        const secondErrorWasUnhandled = emitStreamError(
+          child[streamName],
+          `${streamName} second raw host detail`,
+        );
+        child.emit("close", 0);
+
+        const result = await completion;
+        expect(firstErrorWasUnhandled).toBe(false);
+        expect(secondErrorWasUnhandled).toBe(false);
+        expect(child.killed).toBe(true);
+        expect(result).toMatchObject({
+          status: "spawn_failed",
+          exitCode: null,
+          timedOut: false,
+          summary: "VERIFICATION_SPAWN_FAILED",
+        });
+        expect(result.summary).not.toContain("raw host detail");
+      }
+    });
+  });
+
+  it("preserves timeout and output-limit terminal results across late stream-error and close races", async () => {
+    await withPackageFixture('process.stdout.write("unused");', async (cwd) => {
+      const scenarios = [
+        {
+          command: { ...npmTestCommand, timeoutMs: 1 },
+          expected: { status: "timed_out", timedOut: true, summary: "VERIFICATION_TIMEOUT" },
+          trigger: async (child: FakeChild) => {
+            await delay(20);
+            return emitStreamError(child.stdout, "timeout race raw host detail");
+          },
+        },
+        {
+          command: { ...npmTestCommand, maxOutputBytes: 1_024 },
+          expected: {
+            status: "output_limit",
+            timedOut: false,
+            summary: "VERIFICATION_OUTPUT_LIMIT",
+          },
+          trigger: async (child: FakeChild) => {
+            child.stdout.write(Buffer.alloc(1_025));
+            return emitStreamError(child.stderr, "output race raw host detail");
+          },
+        },
+      ] as const;
+
+      let expectedSpawnCount = 0;
+      for (const scenario of scenarios) {
+        const child = createFakeChild();
+        spawnHarness.nextChild = child;
+        const completion = runVerification({ command: scenario.command, cwd });
+
+        expectedSpawnCount += 1;
+        await waitForSpawnCount(expectedSpawnCount);
+        const errorWasUnhandled = await scenario.trigger(child);
+        child.emit("close", null);
+
+        await expect(completion).resolves.toMatchObject({
+          ...scenario.expected,
+          exitCode: null,
+        });
+        expect(errorWasUnhandled).toBe(false);
+        expect(child.killed).toBe(true);
+      }
     });
   });
 

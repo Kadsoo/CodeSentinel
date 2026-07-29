@@ -19,15 +19,63 @@ const SPAWN_FAILED_SUMMARY = "VERIFICATION_SPAWN_FAILED";
 const TIMEOUT_SUMMARY = "VERIFICATION_TIMEOUT";
 const OUTPUT_LIMIT_SUMMARY = "VERIFICATION_OUTPUT_LIMIT";
 const NON_TEXT_OUTPUT_SUMMARY = "VERIFICATION_NON_TEXT_OUTPUT";
+const CONTROL_GAP = "\u2063";
+const CONTROL_GAP_PATTERN = "\\u2063*";
+const CONTROL_GAPS_PATTERN = "\\u2063+";
 
 const ANSI_ESCAPE_SEQUENCE =
   /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|[@-_])/gu; // eslint-disable-line no-control-regex -- Terminal escape and bell sequences must be removed.
-// eslint-disable-next-line no-control-regex -- Completed summaries must remove all C0 controls.
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/gu;
-const BEARER_TOKEN = /\bbearer\s+[^\s,;]+/giu;
-const OPENAI_STYLE_TOKEN = /\bsk-[A-Za-z0-9][A-Za-z0-9_-]*/gu;
-const SECRET_ASSIGNMENT =
-  /\b(api[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|secret|token|password|passwd|pwd|key)\s*([=:])\s*("[^"]*"|'[^']*'|[^\s,;]+)/giu;
+// eslint-disable-next-line no-control-regex -- Completed summaries must remove all C0, DEL, and C1 controls.
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/gu;
+const SECRET_NAME_SUFFIX = `(?:${[
+  "key",
+  "token",
+  "secret",
+  "password",
+  "passwd",
+  "pwd",
+]
+  .map(withControlGaps)
+  .join("|")})`;
+const SECRET_NAME_PREFIX = `(?:${[
+  "api",
+  "access",
+  "auth",
+  "bearer",
+  "client",
+  "db",
+  "database",
+  "secret",
+  "private",
+  "service",
+  "session",
+  "refresh",
+]
+  .map(withControlGaps)
+  .join("|")})`;
+const SECRET_NAME = `(?:${SECRET_NAME_PREFIX}${CONTROL_GAP_PATTERN}[_-]?${CONTROL_GAP_PATTERN}${SECRET_NAME_SUFFIX}|${[
+  "secret",
+  "token",
+  "password",
+  "passwd",
+  "pwd",
+  "key",
+]
+  .map(withControlGaps)
+  .join("|")})`;
+const SECRET_VALUE = `(?:"[^"]*"|'[^']*'|[^\\s,;|\\u2063]+(?:${CONTROL_GAPS_PATTERN}[^\\s,;|\\u2063]+)*)`;
+const BEARER_TOKEN = new RegExp(
+  `\\b${withControlGaps("bearer")}(?:\\s|\\u2063)+${SECRET_VALUE}`,
+  "giu",
+);
+const OPENAI_STYLE_TOKEN = new RegExp(
+  `\\b${withControlGaps("sk")}${CONTROL_GAP_PATTERN}-${CONTROL_GAP_PATTERN}[A-Za-z0-9](?:[A-Za-z0-9_-]|\\u2063)*`,
+  "gu",
+);
+const SECRET_ASSIGNMENT = new RegExp(
+  `\\b(${SECRET_NAME})${CONTROL_GAP_PATTERN}\\s*([=:])${CONTROL_GAP_PATTERN}\\s*${SECRET_VALUE}`,
+  "giu",
+);
 
 export type VerificationStatus = "completed" | "timed_out" | "spawn_failed" | "output_limit";
 
@@ -338,6 +386,17 @@ function captureBoundedOutput(input: {
       return;
     }
 
+    const handleStreamError = (): void => {
+      if (selectTerminalStatus("spawn_failed")) {
+        chunks.length = 0;
+        capturedBytes = 0;
+        terminateDirectChild();
+        startCloseGraceTimer();
+      }
+    };
+
+    child.stdout.on("error", handleStreamError);
+    child.stderr.on("error", handleStreamError);
     child.stdout.on("data", handleOutput);
     child.stderr.on("data", handleOutput);
 
@@ -359,11 +418,10 @@ function summarizeCompletedOutput(chunks: readonly Buffer[], capturedBytes: numb
     return NON_TEXT_OUTPUT_SUMMARY;
   }
 
-  const sanitized = redactSecrets(decoded.replace(ANSI_ESCAPE_SEQUENCE, "")).replace(
-    CONTROL_CHARACTER,
-    "",
-  );
-  return limitSummary(sanitized);
+  const normalized = decoded
+    .replace(ANSI_ESCAPE_SEQUENCE, "")
+    .replace(CONTROL_CHARACTER, CONTROL_GAP);
+  return limitSummary(redactSecrets(normalized).replaceAll(CONTROL_GAP, ""));
 }
 
 function redactSecrets(value: string): string {
@@ -462,4 +520,8 @@ function hasControlCharacter(value: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function withControlGaps(value: string): string {
+  return [...value].join(CONTROL_GAP_PATTERN);
 }
