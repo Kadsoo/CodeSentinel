@@ -197,11 +197,44 @@ export function createAgentSessionController(
     ) {
       return terminal(record, "failed", "TOOL_FAILED");
     }
+
+    if (record.session.taskKind === "feature_implementation") {
+      return verifyApprovedFeaturePatch(record, verification);
+    }
     if (verification.exitCode === 0) {
       return terminal(record, "completed", "VERIFICATION_PASSED");
     }
 
-    record.feedback.push(Object.freeze({ kind: "verification", summary: verification.summary }));
+    return resumeAfterFailedVerification(record, verification.summary);
+  }
+
+  async function verifyApprovedFeaturePatch(
+    record: SessionRecord,
+    verification: VerificationObservation,
+  ): Promise<AgentSessionResult> {
+    if (record.phase === "awaiting_test_patch") {
+      if (verification.exitCode === 0) {
+        return terminal(record, "blocked", "FEATURE_TEST_DID_NOT_FAIL");
+      }
+      record.phase = "awaiting_implementation_patch";
+      return resumeAfterFailedVerification(record, verification.summary);
+    }
+
+    if (record.phase === "awaiting_implementation_patch") {
+      if (verification.exitCode === 0) {
+        return terminal(record, "completed", "VERIFICATION_PASSED");
+      }
+      return resumeAfterFailedVerification(record, verification.summary);
+    }
+
+    return terminal(record, "failed", "TOOL_FAILED");
+  }
+
+  async function resumeAfterFailedVerification(
+    record: SessionRecord,
+    summary: string,
+  ): Promise<AgentSessionResult> {
+    record.feedback.push(Object.freeze({ kind: "verification", summary }));
     if (record.session.round >= 3) {
       return terminal(record, "failed", "ROUND_LIMIT_REACHED");
     }
@@ -249,12 +282,17 @@ export function createAgentSessionController(
 
   async function runProviderFeedbackCycles(record: SessionRecord): Promise<AgentSessionResult> {
     while (record.session.state === "running" && record.session.round < 3) {
+      const expectedStage = expectedPatchStage(record.phase);
+      if (expectedStage === undefined) {
+        return terminal(record, "failed", "TOOL_FAILED");
+      }
       let response: unknown;
       try {
         response = await dependencies.provider.complete(
           buildProviderRequest({
             taskSummary: record.session.taskSummary,
             phase: record.phase,
+            expectedPatchStage: expectedStage,
             verificationCommandId: record.session.verificationCommandId,
             feedback: record.feedback,
           }),
@@ -278,7 +316,7 @@ export function createAgentSessionController(
       if (!(await appendEvent(record, "action", action.kind))) {
         return eventSinkFailure(record);
       }
-      if (action.kind === "propose_patch" && action.stage !== expectedPatchStage(record)) {
+      if (action.kind === "propose_patch" && action.stage !== expectedStage) {
         return terminal(record, "blocked", "FEATURE_STAGE_INVALID");
       }
 
@@ -660,8 +698,8 @@ function incrementRound(record: SessionRecord): void {
   record.session = freezeSession({ ...record.session, round: record.session.round + 1 });
 }
 
-function expectedPatchStage(record: SessionRecord): AgentStage | undefined {
-  switch (record.phase) {
+function expectedPatchStage(phase: SessionPhase): AgentStage | undefined {
+  switch (phase) {
     case "repair":
       return "repair";
     case "awaiting_test_patch":

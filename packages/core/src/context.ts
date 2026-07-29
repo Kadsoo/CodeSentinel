@@ -1,5 +1,5 @@
 import type { ProviderMessage, ProviderRequest } from "../../providers/src/index.js";
-import type { SessionPhase } from "./types.js";
+import type { AgentStage, SessionPhase } from "./types.js";
 
 export const MAX_CONTEXT_CHARACTERS = 4_096;
 export const MAX_FEEDBACK_ITEMS = 3;
@@ -29,6 +29,7 @@ export type ProviderFeedback = Readonly<{
 export type BuildProviderRequestInput = Readonly<{
   taskSummary: string;
   phase: SessionPhase;
+  expectedPatchStage: AgentStage;
   verificationCommandId?: string;
   feedback: readonly ProviderFeedback[];
 }>;
@@ -44,6 +45,7 @@ export function buildProviderRequest(input: BuildProviderRequestInput): Provider
     [
       `Task summary: ${limit(sanitize(input.taskSummary), MAX_TASK_SUMMARY_CHARACTERS)}`,
       `Phase: ${sanitize(input.phase)}`,
+      `Expected patch stage: ${sanitize(input.expectedPatchStage)}`,
       `Verification command ID: ${limit(
         sanitize(input.verificationCommandId ?? "unselected"),
         MAX_COMMAND_ID_CHARACTERS,

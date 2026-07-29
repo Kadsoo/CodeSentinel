@@ -6,6 +6,7 @@ describe("buildProviderRequest", () => {
     const request = buildProviderRequest({
       taskSummary: "Repair the selected test",
       phase: "repair",
+      expectedPatchStage: "repair",
       feedback: [
         {
           kind: "verification",
@@ -25,6 +26,7 @@ describe("buildProviderRequest", () => {
     const request = buildProviderRequest({
       taskSummary: "Repair the selected test",
       phase: "repair",
+      expectedPatchStage: "repair",
       feedback: [
         {
           kind: "verification",
@@ -45,6 +47,7 @@ describe("buildProviderRequest", () => {
     const request = buildProviderRequest({
       taskSummary: "Repair the selected test",
       phase: "repair",
+      expectedPatchStage: "repair",
       feedback: [
         {
           kind: "verification",
@@ -68,6 +71,7 @@ describe("buildProviderRequest", () => {
     const request = buildProviderRequest({
       taskSummary: "Repair the selected test",
       phase: "repair",
+      expectedPatchStage: "repair",
       feedback: [
         {
           kind: "verification",
