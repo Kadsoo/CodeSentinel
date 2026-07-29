@@ -479,10 +479,10 @@ describe("runVerification", () => {
         "const lineFeed = String.fromCharCode(10);",
         "const escape = String.fromCharCode(27);",
         "const del = String.fromCharCode(0x7f);",
-        "const c1Dcs = String.fromCharCode(0x90);",
+        "const c1Control = String.fromCharCode(0x91);",
         "const c1Osc = String.fromCharCode(0x9d);",
         "const bell = String.fromCharCode(7);",
-        'process.stdout.write([`pass${nul}word=alpha-nul-leak`, `api_key${nul}=bravo-nul-leak`, `secret${lineFeed}Key=charlie-newline-leak`, `db${escape}[31mPassword=delta-ansi-leak`, `api${c1Dcs}Key=echo-c1-leak`, `access${del}Token=foxtrot-del-token-leak`, `authToken=golf-auth-token-leak`, `clientSecret=hotel-client-secret-leak`, `password=india${lineFeed}value-tail-leak`, `p${nul}a${nul}ss${nul}word=juliet-fragment-leak`, `apiK${nul}ey=kilo-fragment-leak`, `Be${nul}arer lima-bearer-fragment-leak`, `sk-${nul}mike-openai-fragment-leak`, `${c1Osc}window-title${bell}plain`, "ordinary-output-tail"].join("|"));',
+        'process.stdout.write([`pass${nul}word=alpha-nul-leak`, `api_key${nul}=bravo-nul-leak`, `secret${lineFeed}Key=charlie-newline-leak`, `db${escape}[31mPassword=delta-ansi-leak`, `api${c1Control}Key=echo-c1-leak`, `access${del}Token=foxtrot-del-token-leak`, `authToken=golf-auth-token-leak`, `clientSecret=hotel-client-secret-leak`, `password=india${lineFeed}value-tail-leak`, `p${nul}a${nul}ss${nul}word=juliet-fragment-leak`, `apiK${nul}ey=kilo-fragment-leak`, `Be${nul}arer lima-bearer-fragment-leak`, `sk-${nul}mike-openai-fragment-leak`, `${c1Osc}window-title${bell}plain`, "ordinary-output-tail"].join("|"));',
       ].join("\n"),
       async (cwd) => {
         const result = await runVerification({ command: npmTestCommand, cwd });
@@ -659,6 +659,218 @@ describe("runVerification", () => {
 
           expect(result.status).toBe("completed");
           expect(result.summary).toContain("ordinary-output-tail");
+        },
+      );
+    },
+    2_000,
+  );
+
+  it("pre-redacts an ESC c final that completes a secret key", async () => {
+    await withPackageFixture(
+      [
+        "const escape = String.fromCharCode(27);",
+        'process.stdout.write(`pass${escape}cword=top-secret|ordinary-output-tail`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain("top-secret");
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(result.summary).not.toContain("\u001b");
+      },
+    );
+  });
+
+  it("consumes complete ESC intermediate and final sequences", async () => {
+    await withPackageFixture(
+      [
+        "const escape = String.fromCharCode(27);",
+        'process.stdout.write(`prefix${escape}7${escape}8${escape}(0ordinary-output-tail`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).toContain("prefixordinary-output-tail");
+        expect(result.summary).not.toContain("\u001b");
+      },
+    );
+  });
+
+  it("fails closed for an unterminated nested 7-bit CSI", async () => {
+    await withPackageFixture(
+      [
+        "const escape = String.fromCharCode(27);",
+        'process.stdout.write(`pass${escape}[${escape}[word=top-secret`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).toContain("pass");
+        expect(result.summary).not.toContain("top-secret");
+        expect(result.summary).not.toContain("word=");
+        expect(result.summary).not.toContain("\u001b");
+      },
+    );
+  });
+
+  it("fails closed for an unterminated nested C1 CSI", async () => {
+    await withPackageFixture(
+      [
+        "const c1Csi = String.fromCharCode(0x9b);",
+        'process.stdout.write(`pass${c1Csi}${c1Csi}word=top-secret|untrusted-tail`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).toContain("pass");
+        expect(result.summary).not.toContain("top-secret");
+        expect(result.summary).not.toContain("word=");
+        expect(result.summary).not.toContain("untrusted-tail");
+        expect(
+          [...result.summary].some((character) => {
+            const codePoint = character.codePointAt(0);
+            return codePoint !== undefined && codePoint >= 128 && codePoint <= 159;
+          }),
+        ).toBe(false);
+      },
+    );
+  });
+
+  it("fails closed for an unknown ESC control sequence", async () => {
+    await withPackageFixture(
+      [
+        "const escape = String.fromCharCode(27);",
+        "const nul = String.fromCharCode(0);",
+        'process.stdout.write(`pass${escape}${nul}unknown-control-payload|untrusted-tail`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).toContain("pass");
+        expect(result.summary).not.toContain("unknown-control-payload");
+        expect(result.summary).not.toContain("untrusted-tail");
+        expect(result.summary).not.toContain("\u001b");
+      },
+    );
+  });
+
+  it.each([
+    ["OSC", 0x5d],
+    ["DCS", 0x50],
+    ["SOS", 0x58],
+    ["PM", 0x5e],
+    ["APC", 0x5f],
+  ] as const)("consumes a complete 7-bit %s string atomically", async (name, introducer) => {
+    const payload = `seven-bit-${name.toLowerCase()}-payload`;
+    const secret = `seven-bit-${name.toLowerCase()}-secret`;
+    await withPackageFixture(
+      [
+        `process.stdout.write(String.fromCharCode(27, ${introducer}) + "${payload}" + String.fromCharCode(27, 92) + "serviceToken=${secret}|ordinary-output-tail");`,
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain(payload);
+        expect(result.summary).not.toContain(secret);
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(result.summary).not.toContain("\u001b");
+      },
+    );
+  });
+
+  it.each([
+    ["OSC", 0x9d],
+    ["DCS", 0x90],
+    ["SOS", 0x98],
+    ["PM", 0x9e],
+    ["APC", 0x9f],
+  ] as const)("consumes a complete C1 %s string atomically", async (name, introducer) => {
+    const payload = `c1-${name.toLowerCase()}-payload`;
+    const secret = `c1-${name.toLowerCase()}-secret`;
+    await withPackageFixture(
+      [
+        `process.stdout.write(String.fromCharCode(${introducer}) + "${payload}" + String.fromCharCode(27, 92) + "serviceToken=${secret}|ordinary-output-tail");`,
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain(payload);
+        expect(result.summary).not.toContain(secret);
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(
+          [...result.summary].some((character) => {
+            const codePoint = character.codePointAt(0);
+            return codePoint !== undefined && codePoint >= 128 && codePoint <= 159;
+          }),
+        ).toBe(false);
+      },
+    );
+  });
+
+  it("redacts a JSON quoted secret key", async () => {
+    await withPackageFixture(
+      "process.stdout.write('{\"password\":\"json-secret\"}|ordinary-output-tail');",
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain("json-secret");
+        expect(result.summary).toContain("ordinary-output-tail");
+      },
+    );
+  });
+
+  it("redacts a quoted value through escaped quotes", async () => {
+    await withPackageFixture(
+      [
+        "const quote = String.fromCharCode(34);",
+        "const slash = String.fromCharCode(92);",
+        'process.stdout.write(`password=${quote}first${slash}${quote}second${quote}|ordinary-output-tail`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain("first");
+        expect(result.summary).not.toContain("second");
+        expect(result.summary).toContain("ordinary-output-tail");
+      },
+    );
+  });
+
+  it("redacts generic underscore-delimited environment secret names", async () => {
+    await withPackageFixture(
+      'process.stdout.write("MY_PASSWORD=underscore-secret|USER_TOKEN=user-token-secret|monkey=ordinary-monkey-value|ordinary-output-tail");',
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain("underscore-secret");
+        expect(result.summary).not.toContain("user-token-secret");
+        expect(result.summary).toContain("ordinary-monkey-value");
+        expect(result.summary).toContain("ordinary-output-tail");
+      },
+    );
+  });
+
+  it(
+    "redacts near-budget repeated environment secret assignments without timing out",
+    async () => {
+      await withPackageFixture(
+        'process.stdout.write("USER_TOKEN=top-secret|".repeat(2600) + "ordinary-output-tail");',
+        async (cwd) => {
+          const result = await runVerification({ command: npmTestCommand, cwd });
+
+          expect(result.status).toBe("completed");
+          expect(result.summary).not.toContain("top-secret");
+          expect(result.summary).toContain("[REDACTED]");
         },
       );
     },

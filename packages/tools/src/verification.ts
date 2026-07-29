@@ -23,8 +23,12 @@ const NON_TEXT_OUTPUT_SUMMARY = "VERIFICATION_NON_TEXT_OUTPUT";
 const ESCAPE = "\u001b";
 const BELL = "\u0007";
 const STRING_TERMINATOR = "\u009c";
+const C1_DCS = "\u0090";
 const C1_CSI = "\u009b";
 const C1_OSC = "\u009d";
+const C1_SOS = "\u0098";
+const C1_PM = "\u009e";
+const C1_APC = "\u009f";
 const CONTROL_GAP = "\u2063";
 const REDACTED_VALUE = "[REDACTED]";
 const SECRET_NAME_SUFFIXES = [
@@ -90,6 +94,7 @@ type RedactionRange = Readonly<{
 }>;
 
 type TerminalSequence = Readonly<{
+  complete: boolean;
   end: number;
   semanticFinal?: string;
 }>;
@@ -449,18 +454,20 @@ function summarizeCompletedOutput(chunks: readonly Buffer[], capturedBytes: numb
 }
 
 function normalizeTerminalOutput(value: string): NormalizedOutput {
-  let display = "";
-  let semantic = "";
+  const displayParts: string[] = [];
+  const semanticParts: string[] = [];
+  let displayLength = 0;
   const semanticOffsets = [0];
 
   const appendVisible = (character: string): void => {
-    display += character;
-    semantic += character;
-    semanticOffsets.push(display.length);
+    displayParts.push(character);
+    semanticParts.push(character);
+    displayLength += character.length;
+    semanticOffsets.push(displayLength);
   };
   const appendSemanticFinal = (character: string): void => {
-    semantic += character;
-    semanticOffsets.push(display.length);
+    semanticParts.push(character);
+    semanticOffsets.push(displayLength);
   };
 
   for (let index = 0; index < value.length; ) {
@@ -468,28 +475,25 @@ function normalizeTerminalOutput(value: string): NormalizedOutput {
 
     if (character === ESCAPE) {
       const sequence = consumeSevenBitEscapeSequence(value, index);
-      if (sequence !== undefined) {
-        if (sequence.semanticFinal !== undefined) {
-          appendSemanticFinal(sequence.semanticFinal);
-        }
-        index = sequence.end;
-        continue;
+      if (!sequence.complete) {
+        break;
       }
+      if (sequence.semanticFinal !== undefined) {
+        appendSemanticFinal(sequence.semanticFinal);
+      }
+      index = sequence.end;
+      continue;
     }
 
-    if (character === C1_CSI) {
-      const sequence = consumeCsiSequence(value, index, 1);
-      if (sequence !== undefined) {
-        if (sequence.semanticFinal !== undefined) {
-          appendSemanticFinal(sequence.semanticFinal);
-        }
-        index = sequence.end;
-        continue;
+    const c1Sequence = consumeC1TerminalSequence(value, index);
+    if (c1Sequence !== undefined) {
+      if (!c1Sequence.complete) {
+        break;
       }
-    }
-
-    if (character === C1_OSC) {
-      index = consumeOscSequence(value, index, 1);
+      if (c1Sequence.semanticFinal !== undefined) {
+        appendSemanticFinal(c1Sequence.semanticFinal);
+      }
+      index = c1Sequence.end;
       continue;
     }
 
@@ -498,34 +502,54 @@ function normalizeTerminalOutput(value: string): NormalizedOutput {
   }
 
   return Object.freeze({
-    display,
-    semantic,
+    display: displayParts.join(""),
+    semantic: semanticParts.join(""),
     semanticOffsets: Object.freeze(semanticOffsets),
   });
 }
 
-function consumeSevenBitEscapeSequence(
-  value: string,
-  index: number,
-): TerminalSequence | undefined {
+function consumeSevenBitEscapeSequence(value: string, index: number): TerminalSequence {
   const next = value[index + 1];
   if (next === "]") {
-    return { end: consumeOscSequence(value, index, 2) };
+    return consumeStringSequence(value, index, 2, true);
   }
   if (next === "[") {
     return consumeCsiSequence(value, index, 2);
   }
-  if (next !== undefined && isEscapeFinal(next)) {
-    return { end: index + 2 };
+  if (next === "P" || next === "X" || next === "^" || next === "_") {
+    return consumeStringSequence(value, index, 2, false);
   }
-  return undefined;
+
+  let cursor = index + 1;
+  while (cursor < value.length && isEscapeIntermediate(value[cursor]!)) {
+    cursor += 1;
+  }
+
+  const semanticFinal = value[cursor];
+  if (semanticFinal === undefined || !isEscapeSequenceFinal(semanticFinal)) {
+    return incompleteTerminalSequence(value);
+  }
+
+  return { complete: true, end: cursor + 1, semanticFinal };
 }
 
-function consumeCsiSequence(
-  value: string,
-  index: number,
-  prefixLength: number,
-): TerminalSequence | undefined {
+function consumeC1TerminalSequence(value: string, index: number): TerminalSequence | undefined {
+  switch (value[index]) {
+    case C1_CSI:
+      return consumeCsiSequence(value, index, 1);
+    case C1_OSC:
+      return consumeStringSequence(value, index, 1, true);
+    case C1_DCS:
+    case C1_SOS:
+    case C1_PM:
+    case C1_APC:
+      return consumeStringSequence(value, index, 1, false);
+    default:
+      return undefined;
+  }
+}
+
+function consumeCsiSequence(value: string, index: number, prefixLength: number): TerminalSequence {
   let cursor = index + prefixLength;
   while (cursor < value.length && isCsiParameter(value[cursor]!)) {
     cursor += 1;
@@ -536,37 +560,47 @@ function consumeCsiSequence(
 
   const semanticFinal = value[cursor];
   if (semanticFinal === undefined || !isCsiFinal(semanticFinal)) {
-    return undefined;
+    return incompleteTerminalSequence(value);
   }
 
-  return { end: cursor + 1, semanticFinal };
+  return { complete: true, end: cursor + 1, semanticFinal };
 }
 
-function consumeOscSequence(value: string, index: number, prefixLength: number): number {
+function consumeStringSequence(
+  value: string,
+  index: number,
+  prefixLength: number,
+  allowsBellTerminator: boolean,
+): TerminalSequence {
   let cursor = index + prefixLength;
   while (cursor < value.length) {
     const character = value[cursor]!;
-    if (character === BELL || character === STRING_TERMINATOR) {
-      return cursor + 1;
+    if ((allowsBellTerminator && character === BELL) || character === STRING_TERMINATOR) {
+      return { complete: true, end: cursor + 1 };
     }
     if (character === ESCAPE && value[cursor + 1] === "\\") {
-      return cursor + 2;
+      return { complete: true, end: cursor + 2 };
     }
     cursor += 1;
   }
 
-  return value.length;
+  return incompleteTerminalSequence(value);
+}
+
+function incompleteTerminalSequence(value: string): TerminalSequence {
+  return { complete: false, end: value.length };
 }
 
 function redactNormalizedOutput(normalized: NormalizedOutput): string {
-  const ranges = [
-    ...findRedactionRanges(normalized.display, (index) => index),
-    ...findRedactionRanges(
-      normalized.semantic,
-      (index) => normalized.semanticOffsets[index] ?? normalized.display.length,
-    ),
-  ];
-  return replaceRedactionRanges(normalized.display, ranges);
+  const displayRanges = findRedactionRanges(normalized.display, (index) => index);
+  const semanticRanges = findRedactionRanges(
+    normalized.semantic,
+    (index) => normalized.semanticOffsets[index] ?? normalized.display.length,
+  );
+  return replaceRedactionRanges(
+    normalized.display,
+    mergeOrderedRedactionRanges(normalized.display.length, displayRanges, semanticRanges),
+  );
 }
 
 function findRedactionRanges(
@@ -589,7 +623,7 @@ function findRedactionRanges(
 
   for (let index = 0; index < value.length; index += 1) {
     const character = value[index]!;
-    if (!isAsciiLetter(character) || !hasWordBoundaryBefore(value, index)) {
+    if (!isAsciiLetter(character) || !hasSecretNameBoundaryBefore(value, index)) {
       continue;
     }
 
@@ -607,7 +641,16 @@ function findSecretAssignment(value: string, index: number): RedactionRange | un
     return undefined;
   }
 
-  let cursor = skipAssignmentSeparators(value, nameEnd);
+  let cursor = nameEnd;
+  const quote = value[index - 1];
+  if (isQuote(quote)) {
+    if (value[cursor] !== quote) {
+      return undefined;
+    }
+    cursor += 1;
+  }
+
+  cursor = skipAssignmentSeparators(value, cursor);
   if (value[cursor] !== "=" && value[cursor] !== ":") {
     return undefined;
   }
@@ -698,12 +741,19 @@ function consumeSecretWord(value: string, index: number, word: string): number |
 
 function consumeSecretValue(value: string, index: number): number {
   const first = value[index];
-  if (first === "\"" || first === "'") {
+  if (isQuote(first)) {
     let cursor = index + 1;
-    while (cursor < value.length && value[cursor] !== first) {
+    while (cursor < value.length) {
+      if (value[cursor] === "\\") {
+        cursor += 2;
+        continue;
+      }
+      if (value[cursor] === first) {
+        return cursor + 1;
+      }
       cursor += 1;
     }
-    return cursor < value.length ? cursor + 1 : cursor;
+    return value.length;
   }
 
   let cursor = index;
@@ -747,35 +797,54 @@ function skipControlGaps(value: string, index: number): number {
 }
 
 function replaceRedactionRanges(value: string, ranges: readonly RedactionRange[]): string {
-  const mergedRanges = mergeRedactionRanges(value.length, ranges);
-  if (mergedRanges.length === 0) {
+  if (ranges.length === 0) {
     return value;
   }
 
   let cursor = 0;
-  let redacted = "";
-  for (const range of mergedRanges) {
-    redacted += value.slice(cursor, range.start);
-    redacted += REDACTED_VALUE;
+  const parts: string[] = [];
+  for (const range of ranges) {
+    parts.push(value.slice(cursor, range.start), REDACTED_VALUE);
     cursor = range.end;
   }
-  return redacted + value.slice(cursor);
+  parts.push(value.slice(cursor));
+  return parts.join("");
 }
 
-function mergeRedactionRanges(
+function mergeOrderedRedactionRanges(
   valueLength: number,
-  ranges: readonly RedactionRange[],
+  firstRanges: readonly RedactionRange[],
+  secondRanges: readonly RedactionRange[],
 ): RedactionRange[] {
-  const ordered = ranges
-    .map((range) => ({
-      end: Math.max(0, Math.min(valueLength, range.end)),
-      start: Math.max(0, Math.min(valueLength, range.start)),
-    }))
-    .filter((range) => range.end > range.start)
-    .sort((left, right) => left.start - right.start || left.end - right.end);
   const merged: RedactionRange[] = [];
+  let firstIndex = 0;
+  let secondIndex = 0;
 
-  for (const range of ordered) {
+  while (firstIndex < firstRanges.length || secondIndex < secondRanges.length) {
+    const first = firstRanges[firstIndex];
+    const second = secondRanges[secondIndex];
+    const useFirst =
+      second === undefined ||
+      (first !== undefined &&
+        (first.start < second.start ||
+          (first.start === second.start && first.end <= second.end)));
+    const candidate = useFirst ? first : second;
+    if (useFirst) {
+      firstIndex += 1;
+    } else {
+      secondIndex += 1;
+    }
+    if (candidate === undefined) {
+      continue;
+    }
+
+    const range = {
+      end: Math.max(0, Math.min(valueLength, candidate.end)),
+      start: Math.max(0, Math.min(valueLength, candidate.start)),
+    };
+    if (range.end <= range.start) {
+      continue;
+    }
     const previous = merged[merged.length - 1];
     if (previous !== undefined && range.start <= previous.end) {
       merged[merged.length - 1] = {
@@ -790,9 +859,9 @@ function mergeRedactionRanges(
   return merged;
 }
 
-function hasWordBoundaryBefore(value: string, index: number): boolean {
+function hasSecretNameBoundaryBefore(value: string, index: number): boolean {
   const previous = value[index - 1];
-  return previous === undefined || !isAsciiWordCharacter(previous);
+  return previous === undefined || !isAsciiAlphanumeric(previous);
 }
 
 function isAsciiLetter(character: string): boolean {
@@ -800,19 +869,19 @@ function isAsciiLetter(character: string): boolean {
   return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
 }
 
-function isAsciiWordCharacter(character: string): boolean {
+function isAsciiAlphanumeric(character: string): boolean {
   const code = character.charCodeAt(0);
-  return (
-    isAsciiLetter(character) ||
-    (code >= 48 && code <= 57) ||
-    character === "_"
-  );
+  return isAsciiLetter(character) || (code >= 48 && code <= 57);
 }
 
 function matchesAsciiLetter(character: string, expectedLowercase: string): boolean {
   const code = character.charCodeAt(0);
   const expected = expectedLowercase.charCodeAt(0);
   return code === expected || code === expected - 32;
+}
+
+function isQuote(character: string | undefined): boolean {
+  return character === "\"" || character === "'";
 }
 
 function isWhitespace(character: string): boolean {
@@ -833,9 +902,14 @@ function isTerminalControlCharacter(character: string): boolean {
   return code <= 31 || code === 127 || (code >= 128 && code <= 159);
 }
 
-function isEscapeFinal(character: string): boolean {
+function isEscapeIntermediate(character: string): boolean {
   const code = character.charCodeAt(0);
-  return code >= 64 && code <= 95;
+  return code >= 32 && code <= 47;
+}
+
+function isEscapeSequenceFinal(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return code >= 48 && code <= 126;
 }
 
 function isCsiParameter(character: string): boolean {
