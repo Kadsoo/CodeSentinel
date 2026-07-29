@@ -93,3 +93,12 @@
 - 权限与审批边界：该层仅验证调用者给出的 approval 记录在机械上匹配，不证明其来自人工批准，也不承担 Task 3 policy allowlist 的执行。后续 Task 8/9 必须由受控 dispatcher 与权威存储绑定 action、路径、会话、过期和一次性消费。普通 POSIX `mode & 0o777` 会被保留；不声称保留 ACL、owner、ADS 或 xattr。
 - 实际检查：最终实施分支全量 `npm test` 为 8 文件、83 通过、3 个已记录的平台跳过；`npm run typecheck`、`npm run lint` 和 `git diff --check` 均通过。合并后的 main 再次运行全量测试，同为 83 通过、3 跳过，类型检查、lint 和 merge diff 检查均通过。
 - 保留边界：便携式 `fs/promises` 无法完全消除最终复验到 `rename` 之间的 OS 级 TOCTOU；Windows junction/reparse 直接竞态回归仍建议在具备权限的环境补充。实现明确记录这些限制，未将其表述为已解决。
+
+## 2026-07-29 — TASK-006：受信任 npm 验证运行器
+
+- 隔离与提交：在 `feat/task-6-verification-runner` worktree 中完成；实现经多轮 TDD 和独立安全/质量复核后，本地合并到 `main`（`57faaa0`）。未拉取远程、未推送 GitHub。
+- 命令模型：验证配置由任意 executable 迁移为严格的 `node_npm_cli` launcher；仅允许固定 npm test/run script 参数、受限 timeout/output 预算及受控 command ID。Policy 只从严格配置按 ID 匹配，Task 6 不承担 Policy、approval 或 workspace containment 授权。
+- 运行时边界：只通过 canonical `process.execPath` 执行 canonical npm CLI，并显式 `shell: false`；不使用 PATH、`.cmd`、`cmd.exe`、`exec` 或任意调用方环境。cwd 与命令配置在运行时重验，stdout/stderr 共享字节上限，超时/溢出/启动和流错误均返回稳定、无原始 OS 错误的结果。
+- 输出安全：分别处理 stdout/stderr，固定顺序汇总；对终端控制序列、Cc/Cf、JSON/环境变量形式和常见 token/secret 进行有界脱敏。未知或未完成的终端序列、未闭合 JSON 或悬空敏感赋值会保守返回安全摘要。实现不把 npm script 当作 sandbox，也只尽力终止直接 child。
+- 实际检查：最终 focused runner 测试 77/77；跨包回归 131/131；合并前全量 `npm test` 为 167 通过、3 个平台跳过；`npm run typecheck`、`npm run lint` 和 diff 检查通过。合并后的 `main` 再次运行 `npm test`，为 9 文件通过、167 通过、3 跳过。
+- 保留边界：信任本机 Node/npm 安装，不能消除本地管理员替换或 OS 级 TOCTOU；不保证终止子孙进程，也不提供 OS 级隔离。Task 8 仍必须使用同一配置快照完成 Action/Policy/workspace 授权。

@@ -403,7 +403,7 @@ Completed locally: implementation commit `9e7f32c83aa79beead9fe2ca820ced13071987
 - Create: packages/tools/src/verification.test.ts
 - Modify: packages/tools/src/index.ts
 
-- [ ] **Step 1: Write failing verification tests**
+- [x] **Step 1: Write failing verification tests**
 
 ~~~ts
 import { describe, expect, it } from "vitest";
@@ -426,21 +426,21 @@ it("reports timeout without throwing raw process errors", async () => {
 });
 ~~~
 
-- [ ] **Step 2: Run verification tests to record red**
+- [x] **Step 2: Run verification tests to record red**
 
 Run: npm test -- --run packages/tools/src/verification.test.ts
 Expected: FAIL because runVerification is missing.
 
-- [ ] **Step 3: Implement no-shell execution and bounded capture**
+- [x] **Step 3: Implement no-shell execution and bounded capture**
 
 Use child_process.spawn with shell set to false. Capture bounded stdout and stderr, kill the process on timeout, redact output before returning it, and return commandId, exitCode, durationMs, timedOut and summary instead of throwing unstructured child-process errors.
 
-- [ ] **Step 4: Verify runner behavior**
+- [x] **Step 4: Verify runner behavior**
 
 Run: npm test -- --run packages/tools/src/verification.test.ts
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run:
 
@@ -448,6 +448,8 @@ Run:
 git add packages/tools/src/verification.ts packages/tools/src/verification.test.ts packages/tools/src/index.ts
 git commit -m "feat: run configured verification safely"
 ~~~
+
+Completed locally: the Windows-compatible trusted `node_npm_cli` launcher, bounded no-shell runner, output safety hardening, and related contract/policy migration were implemented through commits `fce8c00`, `7bb6998`, `e6eb67a`, `40ca322`, `50228ae`, `c7808fd`, `da040db`, `60a4a18`, and `b1ec0b6`. Independent security/spec and quality reviews passed; the branch was merged into local `main` by `57faaa0` without a remote pull or push. Final merged-main verification: `npm test` — 9 files passed, 167 passed, 3 skipped.
 
 ### Task 7: Add Provider and Windows credential abstractions
 
