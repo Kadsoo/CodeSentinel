@@ -43,10 +43,10 @@ describe("ActionSchema", () => {
       verificationCommands: [
         {
           id: " test ",
-          executable: "npm",
+          launcher: "node_npm_cli",
           args: ["test"],
           timeoutMs: 30_000,
-          maxOutputBytes: 1_000_000,
+          maxOutputBytes: 65_536,
         },
       ],
     });
@@ -57,5 +57,13 @@ describe("ActionSchema", () => {
       kind: "run_verification",
       commandId: config.verificationCommands[0].id,
     });
+  });
+
+  it("rejects control-bearing verification command ids before normalizing", () => {
+    for (const commandId of ["test\0", "test\n", "test\u007f", "test\u009b31m"]) {
+      expect(
+        ActionSchema.safeParse({ kind: "run_verification", commandId }).success,
+      ).toBe(false);
+    }
   });
 });

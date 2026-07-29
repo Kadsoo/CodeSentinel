@@ -9,6 +9,8 @@ export {
 export type { Action, PolicyDecision, SessionState, TaskKind } from "./action.js";
 export {
   CodeSentinelConfigSchema,
+  MAX_VERIFICATION_OUTPUT_BYTES,
+  MAX_VERIFICATION_TIMEOUT_MS,
   VerificationCommandSchema,
 } from "./config.js";
 export type { CodeSentinelConfig, VerificationCommand } from "./config.js";

@@ -1,53 +1,99 @@
 import { describe, expect, it } from "vitest";
-import { CodeSentinelConfigSchema } from "./index.js";
+import {
+  CodeSentinelConfigSchema,
+  MAX_VERIFICATION_OUTPUT_BYTES,
+  MAX_VERIFICATION_TIMEOUT_MS,
+} from "./index.js";
 
-const validVerificationCommand = {
+const trustedCommand = {
   id: "test",
-  executable: "npm",
-  args: ["test", "--", "--runInBand"],
-  timeoutMs: 30_000,
-  maxOutputBytes: 1_000_000,
+  launcher: "node_npm_cli",
+  args: ["test"],
+  timeoutMs: 1_000,
+  maxOutputBytes: 1_024,
 };
 
 describe("CodeSentinelConfigSchema", () => {
-  it("accepts a complete structured verification command", () => {
+  it("accepts an explicit trusted npm CLI launcher", () => {
     expect(
-      CodeSentinelConfigSchema.parse({
-        verificationCommands: [validVerificationCommand],
-      }),
-    ).toMatchObject({ verificationCommands: [{ executable: "npm" }] });
+      CodeSentinelConfigSchema.parse({ verificationCommands: [trustedCommand] }),
+    ).toMatchObject({
+      verificationCommands: [{ launcher: "node_npm_cli", args: ["test"] }],
+    });
   });
 
-  it("rejects a non-array args value on an otherwise valid command", () => {
-    expect(() =>
-      CodeSentinelConfigSchema.parse({
-        verificationCommands: [
-          {
-            id: "test",
-            executable: "npm",
-            args: "--runInBand",
-            timeoutMs: 30_000,
-            maxOutputBytes: 1_000_000,
-          },
-        ],
-      }),
-    ).toThrow();
+  it("accepts the explicit npm run and run-script forms", () => {
+    for (const args of [
+      ["run", "check"],
+      ["run", "lint"],
+      ["run", "test"],
+      ["run", "typecheck"],
+      ["run", "verify"],
+      ["run-script", "lint"],
+    ]) {
+      expect(
+        CodeSentinelConfigSchema.safeParse({
+          verificationCommands: [{ ...trustedCommand, args }],
+        }).success,
+      ).toBe(true);
+    }
   });
 
-  it("requires executable and argument-array verification commands", () => {
-    expect(() =>
-      CodeSentinelConfigSchema.parse({
-        verificationCommands: [{ id: "test", command: "npm test" }],
-      }),
-    ).toThrow();
+  it("rejects legacy executable and Windows command-wrapper fields alongside a trusted launcher", () => {
+    for (const executable of ["npm", "npm.cmd", "npm.bat", "cmd.exe"]) {
+      expect(
+        CodeSentinelConfigSchema.safeParse({
+          verificationCommands: [{ ...trustedCommand, executable }],
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("requires the explicit trusted npm CLI launcher", () => {
+    expect(
+      CodeSentinelConfigSchema.safeParse({
+        verificationCommands: [{ ...trustedCommand, launcher: undefined }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects arguments and budgets outside the trusted runner grammar", () => {
+    for (const candidate of [
+      { ...trustedCommand, args: ["test", "&&", "publish"] },
+      { ...trustedCommand, args: ["run", "deploy"] },
+      { ...trustedCommand, timeoutMs: MAX_VERIFICATION_TIMEOUT_MS + 1 },
+      { ...trustedCommand, maxOutputBytes: MAX_VERIFICATION_OUTPUT_BYTES + 1 },
+    ]) {
+      expect(
+        CodeSentinelConfigSchema.safeParse({ verificationCommands: [candidate] }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("rejects non-positive runner budgets", () => {
+    for (const candidate of [
+      { ...trustedCommand, timeoutMs: 0 },
+      { ...trustedCommand, maxOutputBytes: 0 },
+    ]) {
+      expect(
+        CodeSentinelConfigSchema.safeParse({ verificationCommands: [candidate] }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("rejects control-bearing and overly long verification command ids", () => {
+    for (const id of ["test\0", "test\n", "test\u009b31m", "x".repeat(129)]) {
+      expect(
+        CodeSentinelConfigSchema.safeParse({
+          verificationCommands: [{ ...trustedCommand, id }],
+        }).success,
+      ).toBe(false);
+    }
   });
 
   it("rejects duplicate verification command ids", () => {
     const result = CodeSentinelConfigSchema.safeParse({
-      verificationCommands: [
-        validVerificationCommand,
-        { ...validVerificationCommand, executable: "pnpm" },
-      ],
+      verificationCommands: [trustedCommand, { ...trustedCommand }],
     });
 
     expect(result.success).toBe(false);
@@ -61,7 +107,7 @@ describe("CodeSentinelConfigSchema", () => {
   it("rejects unknown root properties on a complete config", () => {
     expect(() =>
       CodeSentinelConfigSchema.parse({
-        verificationCommands: [validVerificationCommand],
+        verificationCommands: [trustedCommand],
         unexpected: true,
       }),
     ).toThrow();
@@ -70,7 +116,7 @@ describe("CodeSentinelConfigSchema", () => {
   it("rejects unknown nested verification command properties", () => {
     expect(() =>
       CodeSentinelConfigSchema.parse({
-        verificationCommands: [{ ...validVerificationCommand, unexpected: true }],
+        verificationCommands: [{ ...trustedCommand, unexpected: true }],
       }),
     ).toThrow();
   });

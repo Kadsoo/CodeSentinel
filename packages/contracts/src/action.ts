@@ -5,6 +5,10 @@ const NonEmptyString = z.string().refine((value) => value.trim().length > 0, {
 });
 export const IdentifierSchema = z.string().trim().min(1);
 const Sha256Hash = z.string().regex(/^[0-9a-fA-F]{64}$/);
+const VerificationCommandIdSchema = z
+  .string()
+  .refine((value) => !hasControlCharacter(value))
+  .pipe(IdentifierSchema);
 
 const ListFilesActionSchema = z
   .object({
@@ -53,7 +57,7 @@ const ApplyApprovedPatchActionSchema = z
 const RunVerificationActionSchema = z
   .object({
     kind: z.literal("run_verification"),
-    commandId: IdentifierSchema,
+    commandId: VerificationCommandIdSchema,
   })
   .strict();
 
@@ -93,3 +97,17 @@ export const SessionStateSchema = z.enum([
   "stopped",
 ]);
 export type SessionState = z.infer<typeof SessionStateSchema>;
+
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint !== undefined &&
+      (codePoint <= 31 || codePoint === 127 || (codePoint >= 128 && codePoint <= 159))
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
