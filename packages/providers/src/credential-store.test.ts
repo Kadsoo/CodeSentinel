@@ -66,6 +66,22 @@ describe("InMemoryCredentialStore", () => {
     expect(await store.status(reference)).toBe("missing");
   });
 
+  it("keeps its backing credential map inaccessible to ordinary external tampering", async () => {
+    const { InMemoryCredentialStore } = await credentials();
+    const store = new InMemoryCredentialStore();
+    const externalView = store as unknown as Record<string, unknown>;
+    const forgedCredentials = new Map([[reference, "forged-credential"]]);
+
+    await store.set(reference, secretSentinel);
+
+    expect(Object.getOwnPropertyNames(store)).not.toContain("credentials");
+    expect(externalView.credentials).toBeUndefined();
+
+    externalView.credentials = forgedCredentials;
+
+    expect(await store.get(reference)).toBe(secretSentinel);
+  });
+
   it("returns a non-secret credential status", async () => {
     const { InMemoryCredentialStore } = await credentials();
     const store = new InMemoryCredentialStore();

@@ -57,17 +57,17 @@ function validateSecret(secret: unknown): asserts secret is string {
 }
 
 export class InMemoryCredentialStore implements CredentialStore {
-  private readonly credentials = new Map<string, string>();
+  readonly #credentials = new Map<string, string>();
 
   async set(reference: string, secret: string): Promise<void> {
     validateReference(reference);
     validateSecret(secret);
-    this.credentials.set(reference, secret);
+    this.#credentials.set(reference, secret);
   }
 
   async get(reference: string): Promise<string | undefined> {
     validateReference(reference);
-    return this.credentials.get(reference);
+    return this.#credentials.get(reference);
   }
 
   async status(reference: string): Promise<CredentialStatus> {
@@ -76,7 +76,7 @@ export class InMemoryCredentialStore implements CredentialStore {
 
   async clear(reference: string): Promise<void> {
     validateReference(reference);
-    this.credentials.delete(reference);
+    this.#credentials.delete(reference);
   }
 }
 
