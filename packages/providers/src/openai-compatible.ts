@@ -48,6 +48,7 @@ export class OpenAICompatibleProvider implements Provider {
               signal: controller.signal,
             }),
           controller.signal,
+          cancelResponseBody,
         );
       } catch {
         throw errorForSignal(controller.signal, "PROVIDER_NETWORK_ERROR");
@@ -223,17 +224,22 @@ async function readBoundedUtf8Body(response: Response, signal: AbortSignal): Pro
   }
 }
 
-function raceWithAbort<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+function raceWithAbort<T>(
+  operation: () => Promise<T>,
+  signal: AbortSignal,
+  onLateResolution?: (value: T) => void,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const settle = (settlement: () => void): void => {
+    const settle = (settlement: () => void): boolean => {
       if (settled) {
-        return;
+        return false;
       }
 
       settled = true;
       signal.removeEventListener("abort", onAbort);
       settlement();
+      return true;
     };
     const onAbort = () => {
       settle(() => reject(new ProviderError("PROVIDER_TIMEOUT")));
@@ -250,7 +256,9 @@ function raceWithAbort<T>(operation: () => Promise<T>, signal: AbortSignal): Pro
       const operationPromise = operation();
       Promise.resolve(operationPromise).then(
         (value) => {
-          settle(() => resolve(value));
+          if (!settle(() => resolve(value))) {
+            onLateResolution?.(value);
+          }
         },
         (error: unknown) => {
           settle(() => reject(error));

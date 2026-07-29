@@ -349,6 +349,37 @@ describe("OpenAICompatibleProvider", () => {
     }
   });
 
+  it("cancels a late injected-fetch response after timeout without changing the result", async () => {
+    vi.useFakeTimers();
+
+    try {
+      let resolveFetch: ((response: Response) => void) | undefined;
+      let cancelCalls = 0;
+      const body = {
+        cancel: () => {
+          cancelCalls += 1;
+          return new Promise<void>(() => undefined);
+        },
+      } as unknown as ReadableStream<Uint8Array>;
+      const fetch: FetchLike = () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        });
+      const observation = observePromise(provider(fetch).complete(request()));
+
+      await vi.advanceTimersByTimeAsync(PROVIDER_REQUEST_TIMEOUT_MS);
+      expectObservedProviderError(observation, "PROVIDER_TIMEOUT");
+
+      resolveFetch?.({ ok: true, body } as unknown as Response);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(cancelCalls).toBe(1);
+      expectObservedProviderError(observation, "PROVIDER_TIMEOUT");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps timeout precedence when an aborted fetch resolves with HTTP 500", async () => {
     vi.useFakeTimers();
 
