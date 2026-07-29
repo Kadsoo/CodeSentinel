@@ -583,6 +583,88 @@ describe("runVerification", () => {
     );
   });
 
+  it("treats a C1 OSC ESC-backslash terminator atomically", async () => {
+    await withPackageFixture(
+      [
+        "const c1Osc = String.fromCharCode(0x9d);",
+        "const escape = String.fromCharCode(27);",
+        "const slash = String.fromCharCode(92);",
+        'process.stdout.write(`${c1Osc}escape-title${escape}${slash}serviceToken=synthetic-osc-secret|ordinary-output-tail`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain("escape-title");
+        expect(result.summary).not.toContain("synthetic-osc-secret");
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(
+          [...result.summary].some((character) => {
+            const codePoint = character.codePointAt(0);
+            return (
+              codePoint !== undefined &&
+              (codePoint <= 31 || codePoint === 127 || (codePoint >= 128 && codePoint <= 159))
+            );
+          }),
+        ).toBe(false);
+      },
+    );
+  });
+
+  it("pre-redacts a 7-bit CSI final embedded in a secret key", async () => {
+    await withPackageFixture(
+      [
+        "const escape = String.fromCharCode(27);",
+        'process.stdout.write(`api${escape}[Key=synthetic-7bit-csi-secret|ordinary-output-tail`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain("synthetic-7bit-csi-secret");
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(result.summary).not.toContain("\u001b");
+      },
+    );
+  });
+
+  it("pre-redacts a C1 CSI final with a mixed control separator", async () => {
+    await withPackageFixture(
+      [
+        "const c1Csi = String.fromCharCode(0x9b);",
+        "const nul = String.fromCharCode(0);",
+        'process.stdout.write(`api${c1Csi}Key${nul}=synthetic-c1-csi-gap-secret|ordinary-output-tail`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain("synthetic-c1-csi-gap-secret");
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(result.summary).not.toContain("\u009b");
+      },
+    );
+  });
+
+  it(
+    "processes a near-budget control run without a verification-test timeout",
+    async () => {
+      await withPackageFixture(
+        [
+          "const nul = String.fromCharCode(0);",
+          'process.stdout.write(`api${nul.repeat(60 * 1024)}not-a-secret|ordinary-output-tail`);',
+        ].join("\n"),
+        async (cwd) => {
+          const result = await runVerification({ command: npmTestCommand, cwd });
+
+          expect(result.status).toBe("completed");
+          expect(result.summary).toContain("ordinary-output-tail");
+        },
+      );
+    },
+    2_000,
+  );
+
   it("removes ANSI, NUL, and C0 controls from completed output", async () => {
     await withPackageFixture(
       "process.stdout.write(Buffer.from([0x61, 0x00, 0x1b, 0x5b, 0x33, 0x31, 0x6d, 0x62, 0x07, 0x63]));",

@@ -20,17 +20,13 @@ const SPAWN_FAILED_SUMMARY = "VERIFICATION_SPAWN_FAILED";
 const TIMEOUT_SUMMARY = "VERIFICATION_TIMEOUT";
 const OUTPUT_LIMIT_SUMMARY = "VERIFICATION_OUTPUT_LIMIT";
 const NON_TEXT_OUTPUT_SUMMARY = "VERIFICATION_NON_TEXT_OUTPUT";
+const ESCAPE = "\u001b";
+const BELL = "\u0007";
+const STRING_TERMINATOR = "\u009c";
+const C1_CSI = "\u009b";
+const C1_OSC = "\u009d";
 const CONTROL_GAP = "\u2063";
-const CONTROL_GAP_PATTERN = "\\u2063*";
-const CONTROL_GAPS_PATTERN = "\\u2063+";
-const CONTROL_OR_WHITESPACE_PATTERN = "[\\s\\u2063]*";
-
-const ANSI_ESCAPE_SEQUENCE =
-  /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|[@-_])/gu; // eslint-disable-line no-control-regex -- Terminal escape and bell sequences must be removed.
-const C1_ANSI_ESCAPE_SEQUENCE =
-  /\u009b[0-?]*[ -/]*[@-~]|\u009d[^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)?/gu; // eslint-disable-line no-control-regex -- C1 CSI and OSC terminal sequences must be removed.
-// eslint-disable-next-line no-control-regex -- Completed summaries must remove all C0, DEL, and C1 controls.
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/gu;
+const REDACTED_VALUE = "[REDACTED]";
 const SECRET_NAME_SUFFIXES = [
   "key",
   "token",
@@ -53,39 +49,6 @@ const SECRET_NAME_PREFIXES = [
   "session",
   "refresh",
 ] as const;
-const SECRET_NAME_SUFFIX = `(?:${SECRET_NAME_SUFFIXES
-  .map(withControlGaps)
-  .join("|")})`;
-const SECRET_NAME_PREFIX = `(?:${SECRET_NAME_PREFIXES
-  .map(withControlGaps)
-  .join("|")})`;
-const SECRET_NAME = `(?:${SECRET_NAME_PREFIX}${CONTROL_GAP_PATTERN}[_-]?${CONTROL_GAP_PATTERN}${SECRET_NAME_SUFFIX}|${SECRET_NAME_SUFFIX})`;
-const SECRET_VALUE = `(?:"[^"]*"|'[^']*'|[^\\s,;|\\u2063]+(?:${CONTROL_GAPS_PATTERN}[^\\s,;|\\u2063]+)*)`;
-const CSI_AWARE_SECRET_NAME = `(?:${[
-  ...SECRET_NAME_SUFFIXES.map(withCsiFinals),
-  ...SECRET_NAME_PREFIXES.flatMap((prefix) =>
-    SECRET_NAME_SUFFIXES.map(
-      (suffix) => `${withCsiFinals(prefix)}(?:[_-])?${withCsiFinals(suffix)}`,
-    ),
-  ),
-].join("|")})`;
-const BEARER_TOKEN = new RegExp(
-  `\\b${withControlGaps("bearer")}(?:\\s|\\u2063)+${SECRET_VALUE}`,
-  "giu",
-);
-const OPENAI_STYLE_TOKEN = new RegExp(
-  `\\b${withControlGaps("sk")}${CONTROL_GAP_PATTERN}-${CONTROL_GAP_PATTERN}[A-Za-z0-9](?:[A-Za-z0-9_-]|\\u2063)*`,
-  "gu",
-);
-const SECRET_ASSIGNMENT = new RegExp(
-  `\\b(${SECRET_NAME})${CONTROL_OR_WHITESPACE_PATTERN}([=:])${CONTROL_OR_WHITESPACE_PATTERN}${SECRET_VALUE}`,
-  "giu",
-);
-const CSI_AWARE_SECRET_ASSIGNMENT = new RegExp(
-  `\\b(${CSI_AWARE_SECRET_NAME})\\s*([=:])\\s*${SECRET_VALUE}`,
-  "giu",
-);
-
 export type VerificationStatus = "completed" | "timed_out" | "spawn_failed" | "output_limit";
 
 export type VerificationResult = Readonly<{
@@ -114,6 +77,22 @@ type TrustedNpmInvocation = Readonly<{
 }>;
 
 type TerminalStatus = Exclude<VerificationStatus, "completed">;
+
+type NormalizedOutput = Readonly<{
+  display: string;
+  semantic: string;
+  semanticOffsets: readonly number[];
+}>;
+
+type RedactionRange = Readonly<{
+  end: number;
+  start: number;
+}>;
+
+type TerminalSequence = Readonly<{
+  end: number;
+  semanticFinal?: string;
+}>;
 
 /**
  * Runs one already-configured npm verification command. Callers remain responsible for policy,
@@ -465,26 +444,413 @@ function summarizeCompletedOutput(chunks: readonly Buffer[], capturedBytes: numb
     return NON_TEXT_OUTPUT_SUMMARY;
   }
 
-  // A CSI final can occupy a letter in a secret name; mask that value before removing the sequence.
-  const preRedacted = redactCsiAwareSecretAssignments(decoded);
-  const normalized = preRedacted
-    .replace(ANSI_ESCAPE_SEQUENCE, "")
-    .replace(C1_ANSI_ESCAPE_SEQUENCE, "")
-    .replace(CONTROL_CHARACTER, CONTROL_GAP);
-  return limitSummary(redactSecrets(normalized).replaceAll(CONTROL_GAP, ""));
+  const normalized = normalizeTerminalOutput(decoded);
+  return limitSummary(redactNormalizedOutput(normalized).replaceAll(CONTROL_GAP, ""));
 }
 
-function redactSecrets(value: string): string {
-  return value
-    .replace(BEARER_TOKEN, "Bearer [REDACTED]")
-    .replace(OPENAI_STYLE_TOKEN, "[REDACTED]")
-    .replace(SECRET_ASSIGNMENT, "$1$2[REDACTED]");
+function normalizeTerminalOutput(value: string): NormalizedOutput {
+  let display = "";
+  let semantic = "";
+  const semanticOffsets = [0];
+
+  const appendVisible = (character: string): void => {
+    display += character;
+    semantic += character;
+    semanticOffsets.push(display.length);
+  };
+  const appendSemanticFinal = (character: string): void => {
+    semantic += character;
+    semanticOffsets.push(display.length);
+  };
+
+  for (let index = 0; index < value.length; ) {
+    const character = value[index]!;
+
+    if (character === ESCAPE) {
+      const sequence = consumeSevenBitEscapeSequence(value, index);
+      if (sequence !== undefined) {
+        if (sequence.semanticFinal !== undefined) {
+          appendSemanticFinal(sequence.semanticFinal);
+        }
+        index = sequence.end;
+        continue;
+      }
+    }
+
+    if (character === C1_CSI) {
+      const sequence = consumeCsiSequence(value, index, 1);
+      if (sequence !== undefined) {
+        if (sequence.semanticFinal !== undefined) {
+          appendSemanticFinal(sequence.semanticFinal);
+        }
+        index = sequence.end;
+        continue;
+      }
+    }
+
+    if (character === C1_OSC) {
+      index = consumeOscSequence(value, index, 1);
+      continue;
+    }
+
+    appendVisible(isTerminalControlCharacter(character) ? CONTROL_GAP : character);
+    index += 1;
+  }
+
+  return Object.freeze({
+    display,
+    semantic,
+    semanticOffsets: Object.freeze(semanticOffsets),
+  });
 }
 
-function redactCsiAwareSecretAssignments(value: string): string {
-  return value.includes("\u009b")
-    ? value.replace(CSI_AWARE_SECRET_ASSIGNMENT, "$1$2[REDACTED]")
-    : value;
+function consumeSevenBitEscapeSequence(
+  value: string,
+  index: number,
+): TerminalSequence | undefined {
+  const next = value[index + 1];
+  if (next === "]") {
+    return { end: consumeOscSequence(value, index, 2) };
+  }
+  if (next === "[") {
+    return consumeCsiSequence(value, index, 2);
+  }
+  if (next !== undefined && isEscapeFinal(next)) {
+    return { end: index + 2 };
+  }
+  return undefined;
+}
+
+function consumeCsiSequence(
+  value: string,
+  index: number,
+  prefixLength: number,
+): TerminalSequence | undefined {
+  let cursor = index + prefixLength;
+  while (cursor < value.length && isCsiParameter(value[cursor]!)) {
+    cursor += 1;
+  }
+  while (cursor < value.length && isCsiIntermediate(value[cursor]!)) {
+    cursor += 1;
+  }
+
+  const semanticFinal = value[cursor];
+  if (semanticFinal === undefined || !isCsiFinal(semanticFinal)) {
+    return undefined;
+  }
+
+  return { end: cursor + 1, semanticFinal };
+}
+
+function consumeOscSequence(value: string, index: number, prefixLength: number): number {
+  let cursor = index + prefixLength;
+  while (cursor < value.length) {
+    const character = value[cursor]!;
+    if (character === BELL || character === STRING_TERMINATOR) {
+      return cursor + 1;
+    }
+    if (character === ESCAPE && value[cursor + 1] === "\\") {
+      return cursor + 2;
+    }
+    cursor += 1;
+  }
+
+  return value.length;
+}
+
+function redactNormalizedOutput(normalized: NormalizedOutput): string {
+  const ranges = [
+    ...findRedactionRanges(normalized.display, (index) => index),
+    ...findRedactionRanges(
+      normalized.semantic,
+      (index) => normalized.semanticOffsets[index] ?? normalized.display.length,
+    ),
+  ];
+  return replaceRedactionRanges(normalized.display, ranges);
+}
+
+function findRedactionRanges(
+  value: string,
+  toOutputOffset: (index: number) => number,
+): RedactionRange[] {
+  const ranges: RedactionRange[] = [];
+
+  const addRange = (range: RedactionRange | undefined): void => {
+    if (range === undefined) {
+      return;
+    }
+
+    const start = toOutputOffset(range.start);
+    const end = toOutputOffset(range.end);
+    if (end > start) {
+      ranges.push({ start, end });
+    }
+  };
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (!isAsciiLetter(character) || !hasWordBoundaryBefore(value, index)) {
+      continue;
+    }
+
+    addRange(findSecretAssignment(value, index));
+    addRange(findBearerToken(value, index));
+    addRange(findOpenAiStyleToken(value, index));
+  }
+
+  return ranges;
+}
+
+function findSecretAssignment(value: string, index: number): RedactionRange | undefined {
+  const nameEnd = findSecretNameEnd(value, index);
+  if (nameEnd === undefined) {
+    return undefined;
+  }
+
+  let cursor = skipAssignmentSeparators(value, nameEnd);
+  if (value[cursor] !== "=" && value[cursor] !== ":") {
+    return undefined;
+  }
+
+  cursor = skipAssignmentSeparators(value, cursor + 1);
+  const end = consumeSecretValue(value, cursor);
+  return end > cursor ? { start: cursor, end } : undefined;
+}
+
+function findSecretNameEnd(value: string, index: number): number | undefined {
+  let longestEnd: number | undefined;
+  const consider = (candidate: number | undefined): void => {
+    if (candidate !== undefined && (longestEnd === undefined || candidate > longestEnd)) {
+      longestEnd = candidate;
+    }
+  };
+
+  for (const suffix of SECRET_NAME_SUFFIXES) {
+    consider(consumeSecretWord(value, index, suffix));
+  }
+
+  for (const prefix of SECRET_NAME_PREFIXES) {
+    const prefixEnd = consumeSecretWord(value, index, prefix);
+    if (prefixEnd === undefined) {
+      continue;
+    }
+
+    let suffixStart = skipControlGaps(value, prefixEnd);
+    if (value[suffixStart] === "_" || value[suffixStart] === "-") {
+      suffixStart = skipControlGaps(value, suffixStart + 1);
+    }
+
+    for (const suffix of SECRET_NAME_SUFFIXES) {
+      consider(consumeSecretWord(value, suffixStart, suffix));
+    }
+  }
+
+  return longestEnd;
+}
+
+function findBearerToken(value: string, index: number): RedactionRange | undefined {
+  const bearerEnd = consumeSecretWord(value, index, "bearer");
+  if (bearerEnd === undefined) {
+    return undefined;
+  }
+
+  const valueStart = skipAssignmentSeparators(value, bearerEnd);
+  if (valueStart === bearerEnd) {
+    return undefined;
+  }
+
+  const end = consumeSecretValue(value, valueStart);
+  return end > valueStart ? { start: valueStart, end } : undefined;
+}
+
+function findOpenAiStyleToken(value: string, index: number): RedactionRange | undefined {
+  const prefixEnd = consumeSecretWord(value, index, "sk");
+  if (prefixEnd === undefined) {
+    return undefined;
+  }
+
+  let valueStart = skipControlGaps(value, prefixEnd);
+  if (value[valueStart] !== "-") {
+    return undefined;
+  }
+
+  valueStart = skipControlGaps(value, valueStart + 1);
+  const end = consumeSecretValue(value, valueStart);
+  return end > valueStart ? { start: valueStart, end } : undefined;
+}
+
+function consumeSecretWord(value: string, index: number, word: string): number | undefined {
+  let cursor = index;
+  for (let wordIndex = 0; wordIndex < word.length; wordIndex += 1) {
+    const character = value[cursor];
+    if (character === undefined || !matchesAsciiLetter(character, word[wordIndex]!)) {
+      return undefined;
+    }
+
+    cursor += 1;
+    if (wordIndex < word.length - 1) {
+      cursor = skipControlGaps(value, cursor);
+    }
+  }
+
+  return cursor;
+}
+
+function consumeSecretValue(value: string, index: number): number {
+  const first = value[index];
+  if (first === "\"" || first === "'") {
+    let cursor = index + 1;
+    while (cursor < value.length && value[cursor] !== first) {
+      cursor += 1;
+    }
+    return cursor < value.length ? cursor + 1 : cursor;
+  }
+
+  let cursor = index;
+  while (cursor < value.length) {
+    const character = value[cursor]!;
+    if (character === CONTROL_GAP) {
+      const gapStart = cursor;
+      cursor = skipControlGaps(value, cursor);
+      if (cursor < value.length && !isValueDelimiter(value[cursor]!)) {
+        continue;
+      }
+      return gapStart;
+    }
+    if (isValueDelimiter(character)) {
+      return cursor;
+    }
+    cursor += 1;
+  }
+
+  return cursor;
+}
+
+function skipAssignmentSeparators(value: string, index: number): number {
+  let cursor = index;
+  while (cursor < value.length) {
+    const character = value[cursor]!;
+    if (character !== CONTROL_GAP && !isWhitespace(character)) {
+      break;
+    }
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function skipControlGaps(value: string, index: number): number {
+  let cursor = index;
+  while (value[cursor] === CONTROL_GAP) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function replaceRedactionRanges(value: string, ranges: readonly RedactionRange[]): string {
+  const mergedRanges = mergeRedactionRanges(value.length, ranges);
+  if (mergedRanges.length === 0) {
+    return value;
+  }
+
+  let cursor = 0;
+  let redacted = "";
+  for (const range of mergedRanges) {
+    redacted += value.slice(cursor, range.start);
+    redacted += REDACTED_VALUE;
+    cursor = range.end;
+  }
+  return redacted + value.slice(cursor);
+}
+
+function mergeRedactionRanges(
+  valueLength: number,
+  ranges: readonly RedactionRange[],
+): RedactionRange[] {
+  const ordered = ranges
+    .map((range) => ({
+      end: Math.max(0, Math.min(valueLength, range.end)),
+      start: Math.max(0, Math.min(valueLength, range.start)),
+    }))
+    .filter((range) => range.end > range.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const merged: RedactionRange[] = [];
+
+  for (const range of ordered) {
+    const previous = merged[merged.length - 1];
+    if (previous !== undefined && range.start <= previous.end) {
+      merged[merged.length - 1] = {
+        start: previous.start,
+        end: Math.max(previous.end, range.end),
+      };
+    } else {
+      merged.push(range);
+    }
+  }
+
+  return merged;
+}
+
+function hasWordBoundaryBefore(value: string, index: number): boolean {
+  const previous = value[index - 1];
+  return previous === undefined || !isAsciiWordCharacter(previous);
+}
+
+function isAsciiLetter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isAsciiWordCharacter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return (
+    isAsciiLetter(character) ||
+    (code >= 48 && code <= 57) ||
+    character === "_"
+  );
+}
+
+function matchesAsciiLetter(character: string, expectedLowercase: string): boolean {
+  const code = character.charCodeAt(0);
+  const expected = expectedLowercase.charCodeAt(0);
+  return code === expected || code === expected - 32;
+}
+
+function isWhitespace(character: string): boolean {
+  return character.trim().length === 0;
+}
+
+function isValueDelimiter(character: string): boolean {
+  return (
+    isWhitespace(character) ||
+    character === "," ||
+    character === ";" ||
+    character === "|"
+  );
+}
+
+function isTerminalControlCharacter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return code <= 31 || code === 127 || (code >= 128 && code <= 159);
+}
+
+function isEscapeFinal(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return code >= 64 && code <= 95;
+}
+
+function isCsiParameter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return code >= 48 && code <= 63;
+}
+
+function isCsiIntermediate(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return code >= 32 && code <= 47;
+}
+
+function isCsiFinal(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return code >= 64 && code <= 126;
 }
 
 function limitSummary(value: string): string {
@@ -579,14 +945,4 @@ function hasControlCharacter(value: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function withControlGaps(value: string): string {
-  return [...value].join(CONTROL_GAP_PATTERN);
-}
-
-function withCsiFinals(value: string): string {
-  return [...value]
-    .map((character) => `(?:${character}|\\u009b[0-?]*[ -/]*${character})`)
-    .join("");
 }
