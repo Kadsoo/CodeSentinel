@@ -469,6 +469,9 @@ function normalizeTerminalOutput(value: string): NormalizedOutput {
     semanticParts.push(character);
     semanticOffsets.push(displayLength);
   };
+  const appendSequenceBoundary = (): void => {
+    appendVisible(CONTROL_GAP);
+  };
 
   for (let index = 0; index < value.length; ) {
     const character = value[index]!;
@@ -481,6 +484,7 @@ function normalizeTerminalOutput(value: string): NormalizedOutput {
       if (sequence.semanticFinal !== undefined) {
         appendSemanticFinal(sequence.semanticFinal);
       }
+      appendSequenceBoundary();
       index = sequence.end;
       continue;
     }
@@ -493,11 +497,12 @@ function normalizeTerminalOutput(value: string): NormalizedOutput {
       if (c1Sequence.semanticFinal !== undefined) {
         appendSemanticFinal(c1Sequence.semanticFinal);
       }
+      appendSequenceBoundary();
       index = c1Sequence.end;
       continue;
     }
 
-    appendVisible(isTerminalControlCharacter(character) ? CONTROL_GAP : character);
+    appendVisible(isSummaryGapCharacter(character) ? CONTROL_GAP : character);
     index += 1;
   }
 
@@ -621,15 +626,27 @@ function findRedactionRanges(
     }
   };
 
-  for (let index = 0; index < value.length; index += 1) {
-    const character = value[index]!;
-    if (!isAsciiLetter(character) || !hasSecretNameBoundaryBefore(value, index)) {
+  for (let index = 0; index < value.length; ) {
+    let range: RedactionRange | undefined;
+    if (value[index] === "\"") {
+      range = findJsonSecretAssignment(value, index);
+    } else {
+      const character = value[index]!;
+      if (isAsciiLetter(character) && hasSecretNameBoundaryBefore(value, index)) {
+        range =
+          findSecretAssignment(value, index) ??
+          findBearerToken(value, index) ??
+          findOpenAiStyleToken(value, index);
+      }
+    }
+
+    if (range !== undefined) {
+      addRange(range);
+      index = Math.max(index + 1, range.end);
       continue;
     }
 
-    addRange(findSecretAssignment(value, index));
-    addRange(findBearerToken(value, index));
-    addRange(findOpenAiStyleToken(value, index));
+    index += 1;
   }
 
   return ranges;
@@ -656,8 +673,109 @@ function findSecretAssignment(value: string, index: number): RedactionRange | un
   }
 
   cursor = skipAssignmentSeparators(value, cursor + 1);
-  const end = consumeSecretValue(value, cursor);
-  return end > cursor ? { start: cursor, end } : undefined;
+  return findRedactionRangeForValue(value, cursor);
+}
+
+function findJsonSecretAssignment(value: string, index: number): RedactionRange | undefined {
+  const key = consumeJsonString(value, index);
+  if (key === undefined || !isSensitiveJsonKey(key.value)) {
+    return undefined;
+  }
+
+  let cursor = skipAssignmentSeparators(value, key.end);
+  if (value[cursor] !== ":") {
+    return undefined;
+  }
+
+  cursor = skipAssignmentSeparators(value, cursor + 1);
+  return findRedactionRangeForValue(value, cursor);
+}
+
+function consumeJsonString(
+  value: string,
+  index: number,
+): Readonly<{ end: number; value: string }> | undefined {
+  if (value[index] !== "\"") {
+    return undefined;
+  }
+
+  const parts: string[] = [];
+  for (let cursor = index + 1; cursor < value.length; ) {
+    const character = value[cursor]!;
+    if (character === "\"") {
+      return { end: cursor + 1, value: parts.join("") };
+    }
+    if (character !== "\\") {
+      if (character.charCodeAt(0) <= 31) {
+        return undefined;
+      }
+      parts.push(character);
+      cursor += 1;
+      continue;
+    }
+
+    const escaped = value[cursor + 1];
+    if (escaped === undefined) {
+      return undefined;
+    }
+    if (escaped === "u") {
+      const hexadecimal = value.slice(cursor + 2, cursor + 6);
+      if (hexadecimal.length !== 4 || ![...hexadecimal].every(isHexadecimalCharacter)) {
+        return undefined;
+      }
+      parts.push(String.fromCharCode(Number.parseInt(hexadecimal, 16)));
+      cursor += 6;
+      continue;
+    }
+
+    const decoded = decodeJsonEscape(escaped);
+    if (decoded === undefined) {
+      return undefined;
+    }
+    parts.push(decoded);
+    cursor += 2;
+  }
+
+  return undefined;
+}
+
+function decodeJsonEscape(character: string): string | undefined {
+  switch (character) {
+    case "\"":
+    case "\\":
+    case "/":
+      return character;
+    case "b":
+      return "\b";
+    case "f":
+      return "\f";
+    case "n":
+      return "\n";
+    case "r":
+      return "\r";
+    case "t":
+      return "\t";
+    default:
+      return undefined;
+  }
+}
+
+function isHexadecimalCharacter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 70) ||
+    (code >= 97 && code <= 102)
+  );
+}
+
+function isSensitiveJsonKey(value: string): boolean {
+  const normalized = value.toLowerCase();
+  if (SECRET_NAME_SUFFIXES.some((suffix) => normalized.endsWith(`_${suffix}`))) {
+    return true;
+  }
+
+  return findSecretNameEnd(normalized, 0) === normalized.length;
 }
 
 function findSecretNameEnd(value: string, index: number): number | undefined {
@@ -702,8 +820,7 @@ function findBearerToken(value: string, index: number): RedactionRange | undefin
     return undefined;
   }
 
-  const end = consumeSecretValue(value, valueStart);
-  return end > valueStart ? { start: valueStart, end } : undefined;
+  return findRedactionRangeForValue(value, valueStart);
 }
 
 function findOpenAiStyleToken(value: string, index: number): RedactionRange | undefined {
@@ -718,8 +835,7 @@ function findOpenAiStyleToken(value: string, index: number): RedactionRange | un
   }
 
   valueStart = skipControlGaps(value, valueStart + 1);
-  const end = consumeSecretValue(value, valueStart);
-  return end > valueStart ? { start: valueStart, end } : undefined;
+  return findRedactionRangeForValue(value, valueStart);
 }
 
 function consumeSecretWord(value: string, index: number, word: string): number | undefined {
@@ -774,6 +890,41 @@ function consumeSecretValue(value: string, index: number): number {
   }
 
   return cursor;
+}
+
+function findRedactionRangeForValue(value: string, index: number): RedactionRange | undefined {
+  const end = consumeSecretValue(value, index);
+  if (end > index) {
+    return { start: index, end };
+  }
+
+  return findFirstNonEmptySegment(value, index);
+}
+
+function findFirstNonEmptySegment(value: string, index: number): RedactionRange | undefined {
+  let cursor = index;
+  while (cursor < value.length) {
+    cursor = skipAssignmentSeparators(value, cursor);
+    if (!isFieldSeparator(value[cursor])) {
+      const end = consumeFieldSegment(value, cursor);
+      return end > cursor ? { start: cursor, end } : undefined;
+    }
+    cursor += 1;
+  }
+
+  return undefined;
+}
+
+function consumeFieldSegment(value: string, index: number): number {
+  let cursor = index;
+  while (cursor < value.length && !isFieldSeparator(value[cursor])) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function isFieldSeparator(character: string | undefined): boolean {
+  return character === "|" || character === ";" || character === "," || character === "\r" || character === "\n";
 }
 
 function skipAssignmentSeparators(value: string, index: number): number {
@@ -897,9 +1048,31 @@ function isValueDelimiter(character: string): boolean {
   );
 }
 
+function isSummaryGapCharacter(character: string): boolean {
+  return isTerminalControlCharacter(character) || isInvisibleFormatCharacter(character);
+}
+
 function isTerminalControlCharacter(character: string): boolean {
   const code = character.charCodeAt(0);
   return code <= 31 || code === 127 || (code >= 128 && code <= 159);
+}
+
+function isInvisibleFormatCharacter(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return (
+    code === 0x00ad ||
+    (code >= 0x0600 && code <= 0x0605) ||
+    code === 0x061c ||
+    code === 0x06dd ||
+    code === 0x070f ||
+    code === 0x180e ||
+    (code >= 0x200b && code <= 0x200f) ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2060 && code <= 0x2064) ||
+    (code >= 0x2066 && code <= 0x206f) ||
+    code === 0xfeff ||
+    (code >= 0xfff9 && code <= 0xfffb)
+  );
 }
 
 function isEscapeIntermediate(character: string): boolean {

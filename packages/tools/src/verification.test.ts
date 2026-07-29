@@ -877,6 +877,166 @@ describe("runVerification", () => {
     2_000,
   );
 
+  it.each([
+    ["7-bit CSI", 'String.fromCharCode(27) + "[1234;5678m"', "1234;5678m"],
+    [
+      "7-bit OSC",
+      'String.fromCharCode(27) + "]seven-bit-osc-boundary-payload" + String.fromCharCode(7)',
+      "seven-bit-osc-boundary-payload",
+    ],
+    [
+      "7-bit DCS",
+      'String.fromCharCode(27, 80) + "seven-bit-dcs-boundary-payload" + String.fromCharCode(27, 92)',
+      "seven-bit-dcs-boundary-payload",
+    ],
+    [
+      "7-bit SOS",
+      'String.fromCharCode(27, 88) + "seven-bit-sos-boundary-payload" + String.fromCharCode(27, 92)',
+      "seven-bit-sos-boundary-payload",
+    ],
+    [
+      "7-bit PM",
+      'String.fromCharCode(27, 94) + "seven-bit-pm-boundary-payload" + String.fromCharCode(27, 92)',
+      "seven-bit-pm-boundary-payload",
+    ],
+    [
+      "7-bit APC",
+      'String.fromCharCode(27, 95) + "seven-bit-apc-boundary-payload" + String.fromCharCode(27, 92)',
+      "seven-bit-apc-boundary-payload",
+    ],
+    ["C1 CSI", 'String.fromCharCode(0x9b) + "1234;5678m"', "1234;5678m"],
+    [
+      "C1 OSC",
+      'String.fromCharCode(0x9d) + "c1-osc-boundary-payload" + String.fromCharCode(27, 92)',
+      "c1-osc-boundary-payload",
+    ],
+    [
+      "C1 DCS",
+      'String.fromCharCode(0x90) + "c1-dcs-boundary-payload" + String.fromCharCode(27, 92)',
+      "c1-dcs-boundary-payload",
+    ],
+    [
+      "C1 SOS",
+      'String.fromCharCode(0x98) + "c1-sos-boundary-payload" + String.fromCharCode(27, 92)',
+      "c1-sos-boundary-payload",
+    ],
+    [
+      "C1 PM",
+      'String.fromCharCode(0x9e) + "c1-pm-boundary-payload" + String.fromCharCode(27, 92)',
+      "c1-pm-boundary-payload",
+    ],
+    [
+      "C1 APC",
+      'String.fromCharCode(0x9f) + "c1-apc-boundary-payload" + String.fromCharCode(27, 92)',
+      "c1-apc-boundary-payload",
+    ],
+    ["ESC 7", "String.fromCharCode(27, 55)", "7"],
+  ] as const)(
+    "keeps a sensitive-name boundary after a complete %s sequence",
+    async (name, sequenceExpression, payload) => {
+      const secret = `boundary-${name.toLowerCase().replaceAll(" ", "-")}-secret`;
+      await withPackageFixture(
+        [
+          `process.stdout.write("prefix" + ${sequenceExpression} + "password=${secret}|ordinary-output-tail");`,
+        ].join("\n"),
+        async (cwd) => {
+          const result = await runVerification({ command: npmTestCommand, cwd });
+
+          expect(result.status).toBe("completed");
+          expect(result.summary).not.toContain(secret);
+          expect(result.summary).not.toContain(payload);
+          expect(result.summary).toContain("ordinary-output-tail");
+          expect(result.summary).not.toContain("\u001b");
+          expect(
+            [...result.summary].some((character) => {
+              const codePoint = character.codePointAt(0);
+              return codePoint !== undefined && codePoint >= 128 && codePoint <= 159;
+            }),
+          ).toBe(false);
+        },
+      );
+    },
+  );
+
+  it("redacts compound and escaped JSON secret keys without masking ordinary JSON keys", async () => {
+    await withPackageFixture(
+      'process.stdout.write(String.raw`{"MY_PASSWORD":"json-suffix-secret"}|{"USER_TOKEN":"json-token-secret"}|{"pass\\u0077ord":"escaped-key-secret"}|{"monkey":"json-ordinary-value"}|ordinary-output-tail`);',
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        for (const secret of ["json-suffix-secret", "json-token-secret", "escaped-key-secret"]) {
+          expect(result.summary).not.toContain(secret);
+        }
+        expect(result.summary).toContain("json-ordinary-value");
+        expect(result.summary).toContain("ordinary-output-tail");
+      },
+    );
+  });
+
+  it("normalizes Unicode format gaps before secret and bearer redaction", async () => {
+    await withPackageFixture(
+      [
+        "const zeroWidthSpace = String.fromCharCode(0x200b);",
+        "const wordJoiner = String.fromCharCode(0x2060);",
+        'process.stdout.write([`pass${zeroWidthSpace}word=unicode-zwsp-secret`, `api${wordJoiner}Key=unicode-word-joiner-secret`, `Bearer${zeroWidthSpace}unicode-bearer-secret`, "ordinary-output-tail"].join("|"));',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        for (const secret of [
+          "unicode-zwsp-secret",
+          "unicode-word-joiner-secret",
+          "unicode-bearer-secret",
+        ]) {
+          expect(result.summary).not.toContain(secret);
+        }
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(result.summary).not.toContain("\u200b");
+        expect(result.summary).not.toContain("\u2060");
+      },
+    );
+  });
+
+  it("redacts the first nonempty segment after empty secret assignments across streams", async () => {
+    await withPackageFixture(
+      [
+        'process.stdout.write("password=|operator-secret|pipe-tail\\n");',
+        'process.stderr.write("password=;semicolon-secret;semicolon-tail\\n");',
+        'process.stdout.write("password=,comma-secret,comma-tail\\n");',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        for (const secret of ["operator-secret", "semicolon-secret", "comma-secret"]) {
+          expect(result.summary).not.toContain(secret);
+        }
+        for (const tail of ["pipe-tail", "semicolon-tail", "comma-tail"]) {
+          expect(result.summary).toContain(tail);
+        }
+      },
+    );
+  });
+
+  it(
+    "processes exact repeated secret candidates linearly",
+    async () => {
+      await withPackageFixture(
+        'process.stdout.write("X_TOKEN=x_".repeat(6000));',
+        async (cwd) => {
+          const result = await runVerification({ command: npmTestCommand, cwd });
+
+          expect(result.status).toBe("completed");
+          expect(result.summary).not.toContain("x_");
+          expect(result.summary).toContain("[REDACTED]");
+        },
+      );
+    },
+    2_000,
+  );
+
   it("removes ANSI, NUL, and C0 controls from completed output", async () => {
     await withPackageFixture(
       "process.stdout.write(Buffer.from([0x61, 0x00, 0x1b, 0x5b, 0x33, 0x31, 0x6d, 0x62, 0x07, 0x63]));",
