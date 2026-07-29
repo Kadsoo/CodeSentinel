@@ -19,10 +19,12 @@ export class OpenAICompatibleProvider implements Provider {
   readonly #fetch: FetchLike;
 
   constructor(options: OpenAICompatibleProviderOptions) {
-    this.#endpoint = validateEndpoint(options.endpoint);
-    this.#model = options.model;
-    this.#apiKey = options.apiKey;
-    this.#fetch = options.fetch;
+    const { endpoint, model, apiKey, fetch } = readProviderOptions(options);
+
+    this.#endpoint = validateEndpoint(endpoint);
+    this.#model = model;
+    this.#apiKey = apiKey;
+    this.#fetch = fetch;
   }
 
   async complete(request: ProviderRequest): Promise<unknown> {
@@ -89,6 +91,21 @@ export class OpenAICompatibleProvider implements Provider {
     } finally {
       clearTimeout(timeout);
     }
+  }
+}
+
+function readProviderOptions(
+  options: OpenAICompatibleProviderOptions,
+): OpenAICompatibleProviderOptions {
+  try {
+    return {
+      endpoint: options.endpoint,
+      model: options.model,
+      apiKey: options.apiKey,
+      fetch: options.fetch,
+    };
+  } catch {
+    throw new ProviderError("PROVIDER_INVALID_ENDPOINT");
   }
 }
 

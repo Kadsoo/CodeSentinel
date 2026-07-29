@@ -4,6 +4,7 @@ import {
   OpenAICompatibleProvider,
   PROVIDER_REQUEST_TIMEOUT_MS,
   type FetchLike,
+  type OpenAICompatibleProviderOptions,
 } from "./openai-compatible.js";
 import { ProviderError, type ProviderRequest } from "./provider.js";
 
@@ -189,6 +190,44 @@ describe("OpenAICompatibleProvider", () => {
     expect(captured).not.toHaveProperty("cause");
     expect(String(captured)).not.toContain(unsafeEndpoint);
     expect(calls).toBe(0);
+  });
+
+  it.each(["endpoint", "model", "apiKey", "fetch"] as const)(
+    "maps a throwing %s option getter to a safe constructor error",
+    (field) => {
+      const options: Record<keyof OpenAICompatibleProviderOptions, unknown> = {
+        endpoint,
+        model,
+        apiKey,
+        fetch: async () => completionResponse("null"),
+      };
+      Object.defineProperty(options, field, {
+        enumerable: true,
+        get() {
+          throw new Error(`${field} access leaked ${secretSentinel} and ${apiKey}`);
+        },
+      });
+
+      let captured: unknown;
+      try {
+        new OpenAICompatibleProvider(options as OpenAICompatibleProviderOptions);
+      } catch (error) {
+        captured = error;
+      }
+
+      expectSafeProviderError(captured, "PROVIDER_INVALID_ENDPOINT");
+    },
+  );
+
+  it("maps a null options object to a safe constructor error", () => {
+    let captured: unknown;
+    try {
+      new OpenAICompatibleProvider(null as unknown as OpenAICompatibleProviderOptions);
+    } catch (error) {
+      captured = error;
+    }
+
+    expectSafeProviderError(captured, "PROVIDER_INVALID_ENDPOINT");
   });
 
   it("maps a raw fetch failure to a safe network error without retrying", async () => {
