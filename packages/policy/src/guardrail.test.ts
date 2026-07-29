@@ -90,12 +90,26 @@ describe("evaluateAction", () => {
       },
     };
 
-    for (const commandId of ["test\0", "test\n", "test\u007f", " ".repeat(129)]) {
+    for (const commandId of ["test\0", "test\n", "test\u007f", "test\u009b31m", " ".repeat(129)]) {
       expect(evaluateAction({ kind: "run_verification", commandId }, commandContext)).toEqual({
         decision: "deny",
         reason: "UNKNOWN_COMMAND",
       });
     }
+
+    const c1CommandId = `test${String.fromCharCode(0x9b)}31m`;
+    expect(
+      evaluateAction(
+        { kind: "run_verification", commandId: c1CommandId },
+        {
+          ...context,
+          config: {
+            ...context.config,
+            verificationCommands: [{ ...trustedCommand, id: c1CommandId }],
+          },
+        },
+      ),
+    ).toEqual({ decision: "deny", reason: "UNKNOWN_COMMAND" });
   });
 
   it("denies a legacy executable configuration even when its id matches", () => {

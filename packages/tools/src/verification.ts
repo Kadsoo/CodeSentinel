@@ -10,7 +10,8 @@ import {
 } from "../../contracts/src/index.js";
 
 const MAX_SUMMARY_CHARACTERS = 4_096;
-const TERMINATION_CLOSE_GRACE_MS = 1_000;
+const TERMINATION_SIGNAL_GRACE_MS = 1_000;
+const TERMINATION_FINAL_GRACE_MS = 1_000;
 const UNKNOWN_COMMAND_ID = "unknown";
 
 const INPUT_INVALID_SUMMARY = "VERIFICATION_INPUT_INVALID";
@@ -22,22 +23,23 @@ const NON_TEXT_OUTPUT_SUMMARY = "VERIFICATION_NON_TEXT_OUTPUT";
 const CONTROL_GAP = "\u2063";
 const CONTROL_GAP_PATTERN = "\\u2063*";
 const CONTROL_GAPS_PATTERN = "\\u2063+";
+const CONTROL_OR_WHITESPACE_PATTERN = "[\\s\\u2063]*";
 
 const ANSI_ESCAPE_SEQUENCE =
   /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|[@-_])/gu; // eslint-disable-line no-control-regex -- Terminal escape and bell sequences must be removed.
+const C1_ANSI_ESCAPE_SEQUENCE =
+  /\u009b[0-?]*[ -/]*[@-~]|\u009d[^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)?/gu; // eslint-disable-line no-control-regex -- C1 CSI and OSC terminal sequences must be removed.
 // eslint-disable-next-line no-control-regex -- Completed summaries must remove all C0, DEL, and C1 controls.
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/gu;
-const SECRET_NAME_SUFFIX = `(?:${[
+const SECRET_NAME_SUFFIXES = [
   "key",
   "token",
   "secret",
   "password",
   "passwd",
   "pwd",
-]
-  .map(withControlGaps)
-  .join("|")})`;
-const SECRET_NAME_PREFIX = `(?:${[
+] as const;
+const SECRET_NAME_PREFIXES = [
   "api",
   "access",
   "auth",
@@ -50,20 +52,23 @@ const SECRET_NAME_PREFIX = `(?:${[
   "service",
   "session",
   "refresh",
-]
+] as const;
+const SECRET_NAME_SUFFIX = `(?:${SECRET_NAME_SUFFIXES
   .map(withControlGaps)
   .join("|")})`;
-const SECRET_NAME = `(?:${SECRET_NAME_PREFIX}${CONTROL_GAP_PATTERN}[_-]?${CONTROL_GAP_PATTERN}${SECRET_NAME_SUFFIX}|${[
-  "secret",
-  "token",
-  "password",
-  "passwd",
-  "pwd",
-  "key",
-]
+const SECRET_NAME_PREFIX = `(?:${SECRET_NAME_PREFIXES
   .map(withControlGaps)
   .join("|")})`;
+const SECRET_NAME = `(?:${SECRET_NAME_PREFIX}${CONTROL_GAP_PATTERN}[_-]?${CONTROL_GAP_PATTERN}${SECRET_NAME_SUFFIX}|${SECRET_NAME_SUFFIX})`;
 const SECRET_VALUE = `(?:"[^"]*"|'[^']*'|[^\\s,;|\\u2063]+(?:${CONTROL_GAPS_PATTERN}[^\\s,;|\\u2063]+)*)`;
+const CSI_AWARE_SECRET_NAME = `(?:${[
+  ...SECRET_NAME_SUFFIXES.map(withCsiFinals),
+  ...SECRET_NAME_PREFIXES.flatMap((prefix) =>
+    SECRET_NAME_SUFFIXES.map(
+      (suffix) => `${withCsiFinals(prefix)}(?:[_-])?${withCsiFinals(suffix)}`,
+    ),
+  ),
+].join("|")})`;
 const BEARER_TOKEN = new RegExp(
   `\\b${withControlGaps("bearer")}(?:\\s|\\u2063)+${SECRET_VALUE}`,
   "giu",
@@ -73,7 +78,11 @@ const OPENAI_STYLE_TOKEN = new RegExp(
   "gu",
 );
 const SECRET_ASSIGNMENT = new RegExp(
-  `\\b(${SECRET_NAME})${CONTROL_GAP_PATTERN}\\s*([=:])${CONTROL_GAP_PATTERN}\\s*${SECRET_VALUE}`,
+  `\\b(${SECRET_NAME})${CONTROL_OR_WHITESPACE_PATTERN}([=:])${CONTROL_OR_WHITESPACE_PATTERN}${SECRET_VALUE}`,
+  "giu",
+);
+const CSI_AWARE_SECRET_ASSIGNMENT = new RegExp(
+  `\\b(${CSI_AWARE_SECRET_NAME})\\s*([=:])\\s*${SECRET_VALUE}`,
   "giu",
 );
 
@@ -252,16 +261,41 @@ function captureBoundedOutput(input: {
     let closeCode: number | null = null;
     let terminalStatus: TerminalStatus | undefined;
     let executionTimer: ReturnType<typeof setTimeout> | undefined;
-    let closeGraceTimer: ReturnType<typeof setTimeout> | undefined;
+    let terminationGraceTimer: ReturnType<typeof setTimeout> | undefined;
+    let finalCloseGraceTimer: ReturnType<typeof setTimeout> | undefined;
+    let stdoutDataListener: ((chunk: Buffer) => void) | undefined;
+    let stderrDataListener: ((chunk: Buffer) => void) | undefined;
 
     const clearTimers = (): void => {
       if (executionTimer !== undefined) {
         clearTimeout(executionTimer);
         executionTimer = undefined;
       }
-      if (closeGraceTimer !== undefined) {
-        clearTimeout(closeGraceTimer);
-        closeGraceTimer = undefined;
+      if (terminationGraceTimer !== undefined) {
+        clearTimeout(terminationGraceTimer);
+        terminationGraceTimer = undefined;
+      }
+      if (finalCloseGraceTimer !== undefined) {
+        clearTimeout(finalCloseGraceTimer);
+        finalCloseGraceTimer = undefined;
+      }
+    };
+
+    const stopOutputCapture = (): void => {
+      if (stdoutDataListener !== undefined) {
+        child.stdout?.off("data", stdoutDataListener);
+        stdoutDataListener = undefined;
+      }
+      if (stderrDataListener !== undefined) {
+        child.stderr?.off("data", stderrDataListener);
+        stderrDataListener = undefined;
+      }
+
+      try {
+        child.stdout?.resume();
+        child.stderr?.resume();
+      } catch {
+        // Late stream cleanup must not replace an already-stable terminal result.
       }
     };
 
@@ -272,6 +306,7 @@ function captureBoundedOutput(input: {
 
       settled = true;
       clearTimers();
+      stopOutputCapture();
       resolve(result);
     };
 
@@ -308,26 +343,47 @@ function captureBoundedOutput(input: {
       );
     };
 
-    const terminateDirectChild = (): void => {
+    const signalDirectChild = (signal: NodeJS.Signals): void => {
       try {
-        if (!child.killed) {
-          child.kill();
-        }
+        child.kill(signal);
       } catch {
         // Stable terminal results deliberately do not disclose process errors.
       }
     };
 
-    const startCloseGraceTimer = (): void => {
-      if (closeGraceTimer !== undefined || closed || settled) {
+    const startTerminationLifecycle = (): void => {
+      if (closed || settled || terminalStatus === undefined) {
         return;
       }
 
-      closeGraceTimer = setTimeout(() => {
-        if (terminalStatus !== undefined) {
-          settleOnce(resultForTerminalStatus(terminalStatus));
+      signalDirectChild("SIGTERM");
+      if (closed || settled || terminationGraceTimer !== undefined) {
+        return;
+      }
+
+      terminationGraceTimer = setTimeout(() => {
+        terminationGraceTimer = undefined;
+        if (closed || settled || terminalStatus === undefined) {
+          return;
         }
-      }, TERMINATION_CLOSE_GRACE_MS);
+
+        signalDirectChild("SIGKILL");
+        if (closed || settled || finalCloseGraceTimer !== undefined) {
+          return;
+        }
+
+        finalCloseGraceTimer = setTimeout(() => {
+          finalCloseGraceTimer = undefined;
+          if (closed || settled || terminalStatus === undefined) {
+            return;
+          }
+
+          stopOutputCapture();
+          chunks.length = 0;
+          capturedBytes = 0;
+          settleOnce(resultForTerminalStatus(terminalStatus));
+        }, TERMINATION_FINAL_GRACE_MS);
+      }, TERMINATION_SIGNAL_GRACE_MS);
     };
 
     const selectTerminalStatus = (status: TerminalStatus): boolean => {
@@ -343,6 +399,16 @@ function captureBoundedOutput(input: {
       return true;
     };
 
+    const terminateForTerminalStatus = (status: TerminalStatus): void => {
+      if (!selectTerminalStatus(status)) {
+        return;
+      }
+
+      chunks.length = 0;
+      capturedBytes = 0;
+      startTerminationLifecycle();
+    };
+
     const handleOutput = (chunk: Buffer): void => {
       if (terminalStatus !== undefined || settled || chunk.length === 0) {
         return;
@@ -352,12 +418,7 @@ function captureBoundedOutput(input: {
         capturedBytes > command.maxOutputBytes ||
         chunk.length > command.maxOutputBytes - capturedBytes
       ) {
-        if (selectTerminalStatus("output_limit")) {
-          chunks.length = 0;
-          capturedBytes = 0;
-          terminateDirectChild();
-          startCloseGraceTimer();
-        }
+        terminateForTerminalStatus("output_limit");
         return;
       }
 
@@ -365,12 +426,7 @@ function captureBoundedOutput(input: {
       capturedBytes += chunk.length;
     };
 
-    child.once("error", () => {
-      if (selectTerminalStatus("spawn_failed")) {
-        terminateDirectChild();
-        settleOnce(resultForTerminalStatus("spawn_failed"));
-      }
-    });
+    child.on("error", () => terminateForTerminalStatus("spawn_failed"));
 
     child.once("close", (code) => {
       closed = true;
@@ -379,32 +435,23 @@ function captureBoundedOutput(input: {
     });
 
     if (child.stdout === null || child.stderr === null) {
-      if (selectTerminalStatus("spawn_failed")) {
-        terminateDirectChild();
-        startCloseGraceTimer();
-      }
+      terminateForTerminalStatus("spawn_failed");
       return;
     }
 
     const handleStreamError = (): void => {
-      if (selectTerminalStatus("spawn_failed")) {
-        chunks.length = 0;
-        capturedBytes = 0;
-        terminateDirectChild();
-        startCloseGraceTimer();
-      }
+      terminateForTerminalStatus("spawn_failed");
     };
 
     child.stdout.on("error", handleStreamError);
     child.stderr.on("error", handleStreamError);
-    child.stdout.on("data", handleOutput);
-    child.stderr.on("data", handleOutput);
+    stdoutDataListener = (chunk: Buffer): void => handleOutput(chunk);
+    stderrDataListener = (chunk: Buffer): void => handleOutput(chunk);
+    child.stdout.on("data", stdoutDataListener);
+    child.stderr.on("data", stderrDataListener);
 
     executionTimer = setTimeout(() => {
-      if (selectTerminalStatus("timed_out")) {
-        terminateDirectChild();
-        startCloseGraceTimer();
-      }
+      terminateForTerminalStatus("timed_out");
     }, command.timeoutMs);
   });
 }
@@ -418,8 +465,11 @@ function summarizeCompletedOutput(chunks: readonly Buffer[], capturedBytes: numb
     return NON_TEXT_OUTPUT_SUMMARY;
   }
 
-  const normalized = decoded
+  // A CSI final can occupy a letter in a secret name; mask that value before removing the sequence.
+  const preRedacted = redactCsiAwareSecretAssignments(decoded);
+  const normalized = preRedacted
     .replace(ANSI_ESCAPE_SEQUENCE, "")
+    .replace(C1_ANSI_ESCAPE_SEQUENCE, "")
     .replace(CONTROL_CHARACTER, CONTROL_GAP);
   return limitSummary(redactSecrets(normalized).replaceAll(CONTROL_GAP, ""));
 }
@@ -429,6 +479,12 @@ function redactSecrets(value: string): string {
     .replace(BEARER_TOKEN, "Bearer [REDACTED]")
     .replace(OPENAI_STYLE_TOKEN, "[REDACTED]")
     .replace(SECRET_ASSIGNMENT, "$1$2[REDACTED]");
+}
+
+function redactCsiAwareSecretAssignments(value: string): string {
+  return value.includes("\u009b")
+    ? value.replace(CSI_AWARE_SECRET_ASSIGNMENT, "$1$2[REDACTED]")
+    : value;
 }
 
 function limitSummary(value: string): string {
@@ -510,7 +566,10 @@ function elapsedMilliseconds(startedAt: number): number {
 function hasControlCharacter(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0);
-    if (codePoint !== undefined && (codePoint <= 31 || codePoint === 127)) {
+    if (
+      codePoint !== undefined &&
+      (codePoint <= 31 || codePoint === 127 || (codePoint >= 128 && codePoint <= 159))
+    ) {
       return true;
     }
   }
@@ -524,4 +583,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function withControlGaps(value: string): string {
   return [...value].join(CONTROL_GAP_PATTERN);
+}
+
+function withCsiFinals(value: string): string {
+  return [...value]
+    .map((character) => `(?:${character}|\\u009b[0-?]*[ -/]*${character})`)
+    .join("");
 }

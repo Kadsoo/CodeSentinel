@@ -67,7 +67,10 @@ export type CodeSentinelConfig = z.infer<typeof CodeSentinelConfigSchema>;
 function hasControlCharacter(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0);
-    if (codePoint !== undefined && (codePoint <= 31 || codePoint === 127)) {
+    if (
+      codePoint !== undefined &&
+      (codePoint <= 31 || codePoint === 127 || (codePoint >= 128 && codePoint <= 159))
+    ) {
       return true;
     }
   }

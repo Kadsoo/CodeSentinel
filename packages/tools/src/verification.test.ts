@@ -115,16 +115,21 @@ type FakeChild = EventEmitter & {
   stderr: PassThrough;
   stdout: PassThrough;
   killed: boolean;
-  kill: () => boolean;
+  killCalls: Array<NodeJS.Signals | number | undefined>;
+  kill: (signal?: NodeJS.Signals | number) => boolean;
 };
 
-function createFakeChild(): FakeChild {
+function createFakeChild({ markKilled = true }: { markKilled?: boolean } = {}): FakeChild {
   const child = new EventEmitter() as FakeChild;
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.killed = false;
-  child.kill = () => {
-    child.killed = true;
+  child.killCalls = [];
+  child.kill = (signal) => {
+    child.killCalls.push(signal);
+    if (markKilled) {
+      child.killed = true;
+    }
     return true;
   };
   return child;
@@ -146,6 +151,24 @@ function emitStreamError(stream: PassThrough, message: string): boolean {
     return false;
   } catch {
     return true;
+  }
+}
+
+async function resolveWithin<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error("Timed out waiting for stubborn child cleanup."));
+        }, milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
   }
 }
 
@@ -289,6 +312,26 @@ describe("runVerification", () => {
           summary: "VERIFICATION_INPUT_INVALID",
         });
       }
+    });
+  });
+
+  it("rejects C1-bearing command ids before spawning and never reports them", async () => {
+    await withPackageFixture('process.stdout.write("must not run");', async (cwd) => {
+      const c1CommandId = `test${String.fromCharCode(0x9b)}31m`;
+      const result = await runVerification({
+        command: { ...npmTestCommand, id: c1CommandId },
+        cwd,
+      });
+
+      expect(result).toMatchObject({
+        commandId: "unknown",
+        status: "spawn_failed",
+        exitCode: null,
+        timedOut: false,
+        summary: "VERIFICATION_INPUT_INVALID",
+      });
+      expect(result.commandId).not.toContain(c1CommandId);
+      expect(spawnHarness.calls).toHaveLength(0);
     });
   });
 
@@ -436,9 +479,10 @@ describe("runVerification", () => {
         "const lineFeed = String.fromCharCode(10);",
         "const escape = String.fromCharCode(27);",
         "const del = String.fromCharCode(0x7f);",
-        "const c1Csi = String.fromCharCode(0x9b);",
+        "const c1Dcs = String.fromCharCode(0x90);",
         "const c1Osc = String.fromCharCode(0x9d);",
-        'process.stdout.write([`pass${nul}word=alpha-nul-leak`, `api_key${nul}=bravo-nul-leak`, `secret${lineFeed}Key=charlie-newline-leak`, `db${escape}[31mPassword=delta-ansi-leak`, `api${c1Csi}Key=echo-c1-leak`, `access${del}Token=foxtrot-del-token-leak`, `authToken=golf-auth-token-leak`, `clientSecret=hotel-client-secret-leak`, `password=india${lineFeed}value-tail-leak`, `p${nul}a${nul}ss${nul}word=juliet-fragment-leak`, `apiK${nul}ey=kilo-fragment-leak`, `Be${nul}arer lima-bearer-fragment-leak`, `sk-${nul}mike-openai-fragment-leak`, `${c1Osc}window-title${lineFeed}plain`, "ordinary-output-tail"].join("|"));',
+        "const bell = String.fromCharCode(7);",
+        'process.stdout.write([`pass${nul}word=alpha-nul-leak`, `api_key${nul}=bravo-nul-leak`, `secret${lineFeed}Key=charlie-newline-leak`, `db${escape}[31mPassword=delta-ansi-leak`, `api${c1Dcs}Key=echo-c1-leak`, `access${del}Token=foxtrot-del-token-leak`, `authToken=golf-auth-token-leak`, `clientSecret=hotel-client-secret-leak`, `password=india${lineFeed}value-tail-leak`, `p${nul}a${nul}ss${nul}word=juliet-fragment-leak`, `apiK${nul}ey=kilo-fragment-leak`, `Be${nul}arer lima-bearer-fragment-leak`, `sk-${nul}mike-openai-fragment-leak`, `${c1Osc}window-title${bell}plain`, "ordinary-output-tail"].join("|"));',
       ].join("\n"),
       async (cwd) => {
         const result = await runVerification({ command: npmTestCommand, cwd });
@@ -473,6 +517,68 @@ describe("runVerification", () => {
             );
           }),
         ).toBe(false);
+      },
+    );
+  });
+
+  it("removes complete C1 CSI and OSC sequences before redacting mixed control separators", async () => {
+    await withPackageFixture(
+      [
+        "const nul = String.fromCharCode(0);",
+        "const lineFeed = String.fromCharCode(10);",
+        "const escape = String.fromCharCode(27);",
+        "const bell = String.fromCharCode(7);",
+        "const c1Csi = String.fromCharCode(0x9b);",
+        "const c1Osc = String.fromCharCode(0x9d);",
+        "const c1St = String.fromCharCode(0x9c);",
+        "const slash = String.fromCharCode(92);",
+        'process.stdout.write([`password${c1Csi}31m=alpha-c1-csi-leak`, `db${c1Csi}31mPassword=bravo-c1-camel-leak`, `${c1Osc}window-title${bell}clientSecret=charlie-c1-osc-leak`, `${c1Osc}escape-title${escape}${slash}serviceToken=hotel-c1-osc-escape-leak`, `${c1Osc}st-title${c1St}sessionToken=india-c1-osc-st-leak`, `password ${nul}=delta-space-control-leak`, `password=${lineFeed} ${nul}echo-mixed-control-leak`, `apiKey${escape}[31m ${nul}=foxtrot-escape-control-leak`, `token${c1Csi}1m ${lineFeed}${nul}: golf-c1-mixed-control-leak`, "ordinary-output-tail"].join("|"));',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        for (const secret of [
+          "alpha-c1-csi-leak",
+          "bravo-c1-camel-leak",
+          "charlie-c1-osc-leak",
+          "hotel-c1-osc-escape-leak",
+          "india-c1-osc-st-leak",
+          "delta-space-control-leak",
+          "echo-mixed-control-leak",
+          "foxtrot-escape-control-leak",
+          "golf-c1-mixed-control-leak",
+        ]) {
+          expect(result.summary).not.toContain(secret);
+        }
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(result.summary).not.toContain("31m");
+        for (const oscPayload of ["window-title", "escape-title", "st-title"]) {
+          expect(result.summary).not.toContain(oscPayload);
+        }
+        expect(
+          [...result.summary].some((character) => {
+            const codePoint = character.codePointAt(0);
+            return codePoint !== undefined && codePoint >= 128 && codePoint <= 159;
+          }),
+        ).toBe(false);
+      },
+    );
+  });
+
+  it("redacts a secret whose key contains a bare C1 CSI final before removing that CSI", async () => {
+    await withPackageFixture(
+      [
+        "const c1Csi = String.fromCharCode(0x9b);",
+        'process.stdout.write(`api${c1Csi}Key=bare-c1-csi-secret-leak|ordinary-output-tail`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain("bare-c1-csi-secret-leak");
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(result.summary).not.toContain("\u009b");
       },
     );
   });
@@ -635,6 +741,64 @@ describe("runVerification", () => {
       }
     });
   });
+
+  it(
+    "escalates stubborn direct children, stops capture before fallback, and preserves terminal results",
+    async () => {
+      await withPackageFixture('process.stdout.write("unused");', async (cwd) => {
+        const scenarios = [
+          {
+            command: { ...npmTestCommand, timeoutMs: 1 },
+            expected: { status: "timed_out", timedOut: true, summary: "VERIFICATION_TIMEOUT" },
+            trigger: async (): Promise<void> => {
+              await delay(20);
+            },
+          },
+          {
+            command: { ...npmTestCommand, maxOutputBytes: 1_024 },
+            expected: {
+              status: "output_limit",
+              timedOut: false,
+              summary: "VERIFICATION_OUTPUT_LIMIT",
+            },
+            trigger: async (child: FakeChild): Promise<void> => {
+              child.stdout.write(Buffer.alloc(1_025));
+            },
+          },
+        ] as const;
+
+        let expectedSpawnCount = 0;
+        for (const scenario of scenarios) {
+          const child = createFakeChild({ markKilled: false });
+          spawnHarness.nextChild = child;
+          const completion = runVerification({ command: scenario.command, cwd });
+
+          expectedSpawnCount += 1;
+          await waitForSpawnCount(expectedSpawnCount);
+          await scenario.trigger(child);
+
+          const result = await resolveWithin(completion, 3_500);
+
+          expect(result).toMatchObject({ ...scenario.expected, exitCode: null });
+          expect(child.killCalls).toEqual(["SIGTERM", "SIGKILL"]);
+          expect(child.killed).toBe(false);
+          expect(child.stdout.listenerCount("data")).toBe(0);
+          expect(child.stderr.listenerCount("data")).toBe(0);
+
+          child.stdout.write("late raw output that must not be captured");
+          const streamErrorWasUnhandled = emitStreamError(
+            child.stdout,
+            "late stream error after bounded cleanup",
+          );
+          child.emit("close", 0);
+
+          expect(streamErrorWasUnhandled).toBe(false);
+          await expect(completion).resolves.toEqual(result);
+        }
+      });
+    },
+    12_000,
+  );
 
   it("returns a stable failure when the canonical npm CLI cannot be resolved", async () => {
     launcherResolution.unavailable = true;

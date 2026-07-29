@@ -82,7 +82,7 @@ describe("CodeSentinelConfigSchema", () => {
   });
 
   it("rejects control-bearing and overly long verification command ids", () => {
-    for (const id of ["test\0", "test\n", "x".repeat(129)]) {
+    for (const id of ["test\0", "test\n", "test\u009b31m", "x".repeat(129)]) {
       expect(
         CodeSentinelConfigSchema.safeParse({
           verificationCommands: [{ ...trustedCommand, id }],
