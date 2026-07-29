@@ -20,6 +20,7 @@ const SPAWN_FAILED_SUMMARY = "VERIFICATION_SPAWN_FAILED";
 const TIMEOUT_SUMMARY = "VERIFICATION_TIMEOUT";
 const OUTPUT_LIMIT_SUMMARY = "VERIFICATION_OUTPUT_LIMIT";
 const NON_TEXT_OUTPUT_SUMMARY = "VERIFICATION_NON_TEXT_OUTPUT";
+const CONSERVATIVE_REDACTION_SUMMARY = "VERIFICATION_OUTPUT_REDACTED";
 const ESCAPE = "\u001b";
 const BELL = "\u0007";
 const STRING_TERMINATOR = "\u009c";
@@ -30,6 +31,7 @@ const C1_SOS = "\u0098";
 const C1_PM = "\u009e";
 const C1_APC = "\u009f";
 const CONTROL_GAP = "\u2063";
+const UNICODE_FORMAT_CHARACTER = /^\p{Cf}$/u;
 const REDACTED_VALUE = "[REDACTED]";
 const SECRET_NAME_SUFFIXES = [
   "key",
@@ -83,14 +85,35 @@ type TrustedNpmInvocation = Readonly<{
 type TerminalStatus = Exclude<VerificationStatus, "completed">;
 
 type NormalizedOutput = Readonly<{
+  complete: boolean;
   display: string;
   semantic: string;
   semanticOffsets: readonly number[];
 }>;
 
+type CapturedStream = Readonly<{
+  byteLength: number;
+  chunks: readonly Buffer[];
+}>;
+
 type RedactionRange = Readonly<{
   end: number;
   start: number;
+}>;
+
+type RedactionResult = Readonly<{
+  output: string;
+  unsafe: boolean;
+}>;
+
+type RedactionScan = Readonly<{
+  ranges: readonly RedactionRange[];
+  unsafe: boolean;
+}>;
+
+type JsonString = Readonly<{
+  end: number;
+  value: string;
 }>;
 
 type TerminalSequence = Readonly<{
@@ -238,8 +261,11 @@ function captureBoundedOutput(input: {
   const { child, command, commandId, startedAt } = input;
 
   return new Promise((resolve) => {
-    const chunks: Buffer[] = [];
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     let capturedBytes = 0;
+    let stdoutCapturedBytes = 0;
+    let stderrCapturedBytes = 0;
     let settled = false;
     let closed = false;
     let closeCode: number | null = null;
@@ -322,9 +348,20 @@ function captureBoundedOutput(input: {
           exitCode: closeCode,
           timedOut: false,
           status: "completed" as const,
-          summary: summarizeCompletedOutput(chunks, capturedBytes),
+          summary: summarizeCompletedOutput(
+            { byteLength: stdoutCapturedBytes, chunks: stdoutChunks },
+            { byteLength: stderrCapturedBytes, chunks: stderrChunks },
+          ),
         }),
       );
+    };
+
+    const discardCapturedOutput = (): void => {
+      stdoutChunks.length = 0;
+      stderrChunks.length = 0;
+      capturedBytes = 0;
+      stdoutCapturedBytes = 0;
+      stderrCapturedBytes = 0;
     };
 
     const signalDirectChild = (signal: NodeJS.Signals): void => {
@@ -363,8 +400,7 @@ function captureBoundedOutput(input: {
           }
 
           stopOutputCapture();
-          chunks.length = 0;
-          capturedBytes = 0;
+          discardCapturedOutput();
           settleOnce(resultForTerminalStatus(terminalStatus));
         }, TERMINATION_FINAL_GRACE_MS);
       }, TERMINATION_SIGNAL_GRACE_MS);
@@ -388,12 +424,11 @@ function captureBoundedOutput(input: {
         return;
       }
 
-      chunks.length = 0;
-      capturedBytes = 0;
+      discardCapturedOutput();
       startTerminationLifecycle();
     };
 
-    const handleOutput = (chunk: Buffer): void => {
+    const handleOutput = (chunk: Buffer, stream: "stdout" | "stderr"): void => {
       if (terminalStatus !== undefined || settled || chunk.length === 0) {
         return;
       }
@@ -406,7 +441,13 @@ function captureBoundedOutput(input: {
         return;
       }
 
-      chunks.push(Buffer.from(chunk));
+      if (stream === "stdout") {
+        stdoutChunks.push(Buffer.from(chunk));
+        stdoutCapturedBytes += chunk.length;
+      } else {
+        stderrChunks.push(Buffer.from(chunk));
+        stderrCapturedBytes += chunk.length;
+      }
       capturedBytes += chunk.length;
     };
 
@@ -429,8 +470,8 @@ function captureBoundedOutput(input: {
 
     child.stdout.on("error", handleStreamError);
     child.stderr.on("error", handleStreamError);
-    stdoutDataListener = (chunk: Buffer): void => handleOutput(chunk);
-    stderrDataListener = (chunk: Buffer): void => handleOutput(chunk);
+    stdoutDataListener = (chunk: Buffer): void => handleOutput(chunk, "stdout");
+    stderrDataListener = (chunk: Buffer): void => handleOutput(chunk, "stderr");
     child.stdout.on("data", stdoutDataListener);
     child.stderr.on("data", stderrDataListener);
 
@@ -440,30 +481,53 @@ function captureBoundedOutput(input: {
   });
 }
 
-function summarizeCompletedOutput(chunks: readonly Buffer[], capturedBytes: number): string {
-  const bytes = Buffer.concat(chunks, capturedBytes);
+function summarizeCompletedOutput(stdout: CapturedStream, stderr: CapturedStream): string {
+  const stdoutSummary = summarizeCompletedStream(stdout);
+  const stderrSummary = summarizeCompletedStream(stderr);
+  if (stdoutSummary === undefined || stderrSummary === undefined) {
+    return NON_TEXT_OUTPUT_SUMMARY;
+  }
+  if (stdoutSummary.unsafe || stderrSummary.unsafe) {
+    return CONSERVATIVE_REDACTION_SUMMARY;
+  }
+
+  return limitSummary(
+    [stdoutSummary.output, stderrSummary.output].filter((output) => output.length > 0).join(" "),
+  );
+}
+
+function summarizeCompletedStream(stream: CapturedStream): RedactionResult | undefined {
+  const bytes = Buffer.concat(stream.chunks, stream.byteLength);
   let decoded: string;
   try {
     decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch {
-    return NON_TEXT_OUTPUT_SUMMARY;
+    return undefined;
   }
 
   const normalized = normalizeTerminalOutput(decoded);
-  return limitSummary(redactNormalizedOutput(normalized).replaceAll(CONTROL_GAP, ""));
+  const redacted = redactNormalizedOutput(normalized);
+  return Object.freeze({
+    output: redacted.output.replaceAll(CONTROL_GAP, ""),
+    unsafe: redacted.unsafe,
+  });
 }
 
 function normalizeTerminalOutput(value: string): NormalizedOutput {
   const displayParts: string[] = [];
   const semanticParts: string[] = [];
   let displayLength = 0;
+  let complete = true;
   const semanticOffsets = [0];
 
   const appendVisible = (character: string): void => {
     displayParts.push(character);
     semanticParts.push(character);
+    const displayStart = displayLength;
     displayLength += character.length;
-    semanticOffsets.push(displayLength);
+    for (let characterOffset = 1; characterOffset <= character.length; characterOffset += 1) {
+      semanticOffsets.push(displayStart + characterOffset);
+    }
   };
   const appendSemanticFinal = (character: string): void => {
     semanticParts.push(character);
@@ -474,11 +538,16 @@ function normalizeTerminalOutput(value: string): NormalizedOutput {
   };
 
   for (let index = 0; index < value.length; ) {
-    const character = value[index]!;
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) {
+      break;
+    }
+    const character = String.fromCodePoint(codePoint);
 
     if (character === ESCAPE) {
       const sequence = consumeSevenBitEscapeSequence(value, index);
       if (!sequence.complete) {
+        complete = false;
         break;
       }
       if (sequence.semanticFinal !== undefined) {
@@ -492,6 +561,7 @@ function normalizeTerminalOutput(value: string): NormalizedOutput {
     const c1Sequence = consumeC1TerminalSequence(value, index);
     if (c1Sequence !== undefined) {
       if (!c1Sequence.complete) {
+        complete = false;
         break;
       }
       if (c1Sequence.semanticFinal !== undefined) {
@@ -503,10 +573,11 @@ function normalizeTerminalOutput(value: string): NormalizedOutput {
     }
 
     appendVisible(isSummaryGapCharacter(character) ? CONTROL_GAP : character);
-    index += 1;
+    index += character.length;
   }
 
   return Object.freeze({
+    complete,
     display: displayParts.join(""),
     semantic: semanticParts.join(""),
     semanticOffsets: Object.freeze(semanticOffsets),
@@ -596,22 +667,33 @@ function incompleteTerminalSequence(value: string): TerminalSequence {
   return { complete: false, end: value.length };
 }
 
-function redactNormalizedOutput(normalized: NormalizedOutput): string {
-  const displayRanges = findRedactionRanges(normalized.display, (index) => index);
-  const semanticRanges = findRedactionRanges(
+function redactNormalizedOutput(normalized: NormalizedOutput): RedactionResult {
+  const displayScan = scanRedactionRanges(normalized.display, (index) => index);
+  const semanticScan = scanRedactionRanges(
     normalized.semantic,
     (index) => normalized.semanticOffsets[index] ?? normalized.display.length,
   );
-  return replaceRedactionRanges(
-    normalized.display,
-    mergeOrderedRedactionRanges(normalized.display.length, displayRanges, semanticRanges),
-  );
+  if (displayScan.unsafe || semanticScan.unsafe) {
+    return Object.freeze({ output: "", unsafe: true });
+  }
+
+  return Object.freeze({
+    output: replaceRedactionRanges(
+      normalized.display,
+      mergeOrderedRedactionRanges(
+        normalized.display.length,
+        displayScan.ranges,
+        semanticScan.ranges,
+      ),
+    ),
+    unsafe: false,
+  });
 }
 
-function findRedactionRanges(
+function scanRedactionRanges(
   value: string,
   toOutputOffset: (index: number) => number,
-): RedactionRange[] {
+): RedactionScan {
   const ranges: RedactionRange[] = [];
 
   const addRange = (range: RedactionRange | undefined): void => {
@@ -626,33 +708,92 @@ function findRedactionRanges(
     }
   };
 
-  for (let index = 0; index < value.length; ) {
-    let range: RedactionRange | undefined;
-    if (value[index] === "\"") {
-      range = findJsonSecretAssignment(value, index);
-    } else {
-      const character = value[index]!;
-      if (isAsciiLetter(character) && hasSecretNameBoundaryBefore(value, index)) {
-        range =
-          findSecretAssignment(value, index) ??
-          findBearerToken(value, index) ??
-          findOpenAiStyleToken(value, index);
-      }
+  const scanCandidate = (
+    index: number,
+  ): Readonly<{ range: RedactionRange | undefined; unsafe: boolean }> => {
+    const character = value[index];
+    if (
+      character === undefined ||
+      !isAsciiLetter(character) ||
+      !hasSecretNameBoundaryBefore(value, index)
+    ) {
+      return { range: undefined, unsafe: false };
     }
 
-    if (range !== undefined) {
-      addRange(range);
-      index = Math.max(index + 1, range.end);
+    const assignmentValueStart = findSecretAssignmentValueStart(value, index);
+    if (assignmentValueStart !== undefined) {
+      const range = findRedactionRangeForValue(value, assignmentValueStart);
+      return range === undefined ? { range: undefined, unsafe: true } : { range, unsafe: false };
+    }
+
+    return {
+      range: findBearerToken(value, index) ?? findOpenAiStyleToken(value, index),
+      unsafe: false,
+    };
+  };
+
+  const scanQuotedContent = (
+    start: number,
+    end: number,
+  ): Readonly<{ end: number; unsafe: boolean }> => {
+    let cursor = start;
+    while (cursor < end) {
+      const candidate = scanCandidate(cursor);
+      if (candidate.unsafe) {
+        return { end: cursor, unsafe: true };
+      }
+      if (candidate.range !== undefined) {
+        addRange(candidate.range);
+        cursor = Math.max(cursor + 1, candidate.range.end);
+        continue;
+      }
+      cursor += 1;
+    }
+    return { end: cursor, unsafe: false };
+  };
+
+  for (let index = 0; index < value.length; ) {
+    if (value[index] === "\"") {
+      const jsonString = consumeJsonString(value, index);
+      if (jsonString === undefined) {
+        return Object.freeze({ ranges, unsafe: true });
+      }
+
+      const assignmentValueStart = findJsonSecretAssignmentValueStart(value, jsonString);
+      if (assignmentValueStart !== undefined) {
+        const range = findRedactionRangeForValue(value, assignmentValueStart);
+        if (range === undefined) {
+          return Object.freeze({ ranges, unsafe: true });
+        }
+        addRange(range);
+        index = Math.max(jsonString.end, range.end);
+        continue;
+      }
+
+      const quotedContent = scanQuotedContent(index + 1, jsonString.end - 1);
+      if (quotedContent.unsafe) {
+        return Object.freeze({ ranges, unsafe: true });
+      }
+      index = Math.max(jsonString.end, quotedContent.end);
       continue;
     }
 
+    const candidate = scanCandidate(index);
+    if (candidate.unsafe) {
+      return Object.freeze({ ranges, unsafe: true });
+    }
+    if (candidate.range !== undefined) {
+      addRange(candidate.range);
+      index = Math.max(index + 1, candidate.range.end);
+      continue;
+    }
     index += 1;
   }
 
-  return ranges;
+  return Object.freeze({ ranges, unsafe: false });
 }
 
-function findSecretAssignment(value: string, index: number): RedactionRange | undefined {
+function findSecretAssignmentValueStart(value: string, index: number): number | undefined {
   const nameEnd = findSecretNameEnd(value, index);
   if (nameEnd === undefined) {
     return undefined;
@@ -672,29 +813,23 @@ function findSecretAssignment(value: string, index: number): RedactionRange | un
     return undefined;
   }
 
-  cursor = skipAssignmentSeparators(value, cursor + 1);
-  return findRedactionRangeForValue(value, cursor);
+  return skipAssignmentSeparators(value, cursor + 1);
 }
 
-function findJsonSecretAssignment(value: string, index: number): RedactionRange | undefined {
-  const key = consumeJsonString(value, index);
-  if (key === undefined || !isSensitiveJsonKey(key.value)) {
+function findJsonSecretAssignmentValueStart(value: string, key: JsonString): number | undefined {
+  if (!isSensitiveJsonKey(key.value)) {
     return undefined;
   }
 
-  let cursor = skipAssignmentSeparators(value, key.end);
+  const cursor = skipAssignmentSeparators(value, key.end);
   if (value[cursor] !== ":") {
     return undefined;
   }
 
-  cursor = skipAssignmentSeparators(value, cursor + 1);
-  return findRedactionRangeForValue(value, cursor);
+  return skipAssignmentSeparators(value, cursor + 1);
 }
 
-function consumeJsonString(
-  value: string,
-  index: number,
-): Readonly<{ end: number; value: string }> | undefined {
+function consumeJsonString(value: string, index: number): JsonString | undefined {
   if (value[index] !== "\"") {
     return undefined;
   }
@@ -770,12 +905,25 @@ function isHexadecimalCharacter(character: string): boolean {
 }
 
 function isSensitiveJsonKey(value: string): boolean {
-  const normalized = value.toLowerCase();
-  if (SECRET_NAME_SUFFIXES.some((suffix) => normalized.endsWith(`_${suffix}`))) {
+  const normalized = normalizeTerminalOutput(value);
+  if (!normalized.complete) {
     return true;
   }
 
-  return findSecretNameEnd(normalized, 0) === normalized.length;
+  return (
+    isSensitiveNormalizedJsonKey(normalized.display) ||
+    isSensitiveNormalizedJsonKey(normalized.semantic)
+  );
+}
+
+function isSensitiveNormalizedJsonKey(value: string): boolean {
+  const normalized = value.toLowerCase();
+  const compact = normalized.replaceAll(CONTROL_GAP, "");
+  if (SECRET_NAME_SUFFIXES.some((suffix) => compact.endsWith(`_${suffix}`))) {
+    return true;
+  }
+
+  return findSecretNameEnd(compact, 0) === compact.length;
 }
 
 function findSecretNameEnd(value: string, index: number): number | undefined {
@@ -1058,21 +1206,7 @@ function isTerminalControlCharacter(character: string): boolean {
 }
 
 function isInvisibleFormatCharacter(character: string): boolean {
-  const code = character.charCodeAt(0);
-  return (
-    code === 0x00ad ||
-    (code >= 0x0600 && code <= 0x0605) ||
-    code === 0x061c ||
-    code === 0x06dd ||
-    code === 0x070f ||
-    code === 0x180e ||
-    (code >= 0x200b && code <= 0x200f) ||
-    (code >= 0x202a && code <= 0x202e) ||
-    (code >= 0x2060 && code <= 0x2064) ||
-    (code >= 0x2066 && code <= 0x206f) ||
-    code === 0xfeff ||
-    (code >= 0xfff9 && code <= 0xfffb)
-  );
+  return UNICODE_FORMAT_CHARACTER.test(character);
 }
 
 function isEscapeIntermediate(character: string): boolean {

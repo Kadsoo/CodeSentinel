@@ -999,6 +999,196 @@ describe("runVerification", () => {
     );
   });
 
+  it.each([
+    ["U+0890", 0x0890],
+    ["U+0891", 0x0891],
+    ["U+08E2", 0x08e2],
+    ["zero-width space", 0x200b],
+    ["word joiner", 0x2060],
+    ["language tag", 0xe0001],
+  ] as const)(
+    "normalizes the %s Unicode format gap before masking the next nonempty field segment",
+    async (_name, codePoint) => {
+      const splitKeySecret = `format-gap-${codePoint.toString(16)}-split-key-secret`;
+      const fallbackSecret = `format-gap-${codePoint.toString(16)}-fallback-secret`;
+      await withPackageFixture(
+        [
+          `const formatCharacter = String.fromCodePoint(${codePoint});`,
+          `process.stdout.write(\`pass\${formatCharacter}word=${splitKeySecret}|password=\${formatCharacter}|${fallbackSecret}|tail\`);`,
+        ].join("\n"),
+        async (cwd) => {
+          const result = await runVerification({ command: npmTestCommand, cwd });
+
+          expect(result.status).toBe("completed");
+          expect(result.summary).not.toContain(splitKeySecret);
+          expect(result.summary).not.toContain(fallbackSecret);
+          expect(result.summary).toContain("tail");
+          expect(result.summary).not.toContain(String.fromCodePoint(codePoint));
+          expect(result.summary).not.toContain("\u2063");
+        },
+      );
+    },
+  );
+
+  it("normalizes decoded and raw JSON secret-key gaps before recognizing complete sensitive names", async () => {
+    await withPackageFixture(
+      [
+        "const zeroWidthSpace = String.fromCharCode(0x200b);",
+        "const wordJoiner = String.fromCharCode(0x2060);",
+        "process.stdout.write([",
+        '  String.raw`{"pass\\u200bword":"escaped-zwsp-key-leak"}`,',
+        '  String.raw`{"pass\\u0000word":"escaped-nul-key-leak"}`,',
+        '  String.raw`{"pass\\u001b[31mword":"escaped-ansi-key-leak"}`,',
+        '  `{"MY_${zeroWidthSpace}PASSWORD":"raw-compound-key-leak"}`,',
+        '  `{"USER_TO${wordJoiner}KEN":"raw-user-token-key-leak"}`,',
+        '  String.raw`{"MY_\\u200bPASSWORD":"escaped-compound-key-leak"}`,',
+        '  String.raw`{"USER_TO\\u2060KEN":"escaped-user-token-key-leak"}`,',
+        '  `{"monkey":"json-ordinary-value"}`,',
+        '  "tail",',
+        '].join("|"));',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        for (const secret of [
+          "escaped-zwsp-key-leak",
+          "escaped-nul-key-leak",
+          "escaped-ansi-key-leak",
+          "raw-compound-key-leak",
+          "raw-user-token-key-leak",
+          "escaped-compound-key-leak",
+          "escaped-user-token-key-leak",
+        ]) {
+          expect(result.summary).not.toContain(secret);
+        }
+        expect(result.summary).toContain("json-ordinary-value");
+        expect(result.summary).toContain("tail");
+      },
+    );
+  });
+
+  it("recognizes complete JSON sensitive names with leading or trailing decoded normalization gaps", async () => {
+    await withPackageFixture(
+      [
+        "const marker = String.fromCharCode(0x2063);",
+        "process.stdout.write([",
+        '  String.raw`{"\\u200bpassword":"escaped-leading-cf-key-leak"}`,',
+        '  String.raw`{"password\\u200b":"escaped-trailing-cf-key-leak"}`,',
+        '  String.raw`{"\\u0000password":"escaped-leading-c0-key-leak"}`,',
+        '  String.raw`{"password\\u001b[31m":"escaped-trailing-terminal-key-leak"}`,',
+        '  `{"${marker}password":"raw-leading-marker-key-leak"}`,',
+        '  String.raw`{"password\\u2063":"escaped-trailing-marker-key-leak"}`,',
+        '  "tail",',
+        '].join("|"));',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        for (const secret of [
+          "escaped-leading-cf-key-leak",
+          "escaped-trailing-cf-key-leak",
+          "escaped-leading-c0-key-leak",
+          "escaped-trailing-terminal-key-leak",
+          "raw-leading-marker-key-leak",
+          "escaped-trailing-marker-key-leak",
+        ]) {
+          expect(result.summary).not.toContain(secret);
+        }
+        expect(result.summary).toContain("tail");
+      },
+    );
+  });
+
+  it("treats an input U+2063 marker as a removable format gap without letting it bypass redaction", async () => {
+    await withPackageFixture(
+      [
+        "const marker = String.fromCharCode(0x2063);",
+        'process.stdout.write(`monkey${marker}password=marker-boundary-secret|ordinary-output-tail`);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).not.toContain("marker-boundary-secret");
+        expect(result.summary).toContain("ordinary-output-tail");
+        expect(result.summary).not.toContain("\u2063");
+      },
+    );
+  });
+
+  it(
+    "handles an alternating quote-and-escape tail with a single linear JSON-string scan",
+    async () => {
+      await withPackageFixture(
+        "process.stdout.write(String.fromCharCode(34, 92).repeat(30_000));",
+        async (cwd) => {
+          const result = await runVerification({ command: npmTestCommand, cwd });
+
+          expect(result).toMatchObject({
+            status: "completed",
+            timedOut: false,
+            summary: "VERIFICATION_OUTPUT_REDACTED",
+          });
+        },
+      );
+    },
+    2_000,
+  );
+
+  it("does not join a stderr bare fragment to a stdout dangling sensitive assignment", async () => {
+    await withPackageFixture(
+      [
+        'process.stderr.write("cross-stream-secret");',
+        'setTimeout(() => process.stdout.write("password="), 15);',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result).toMatchObject({
+          status: "completed",
+          timedOut: false,
+          summary: "VERIFICATION_OUTPUT_REDACTED",
+        });
+        expect(result.summary).not.toContain("cross-stream-secret");
+      },
+    );
+  });
+
+  it("keeps immediate stderr and stdout writes from forming a synthetic secret assignment", async () => {
+    await withPackageFixture(
+      [
+        'process.stderr.write("immediate-cross-stream-secret");',
+        'process.stdout.write("password=");',
+      ].join("\n"),
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result).toMatchObject({
+          status: "completed",
+          timedOut: false,
+          summary: "VERIFICATION_OUTPUT_REDACTED",
+        });
+        expect(result.summary).not.toContain("immediate-cross-stream-secret");
+      },
+    );
+  });
+
+  it("keeps independent ordinary stdout and stderr output without using a conservative summary", async () => {
+    await withPackageFixture(
+      'process.stderr.write("ordinary-stderr-output"); process.stdout.write("ordinary-stdout-output");',
+      async (cwd) => {
+        const result = await runVerification({ command: npmTestCommand, cwd });
+
+        expect(result.status).toBe("completed");
+        expect(result.summary).toContain("ordinary-stdout-output");
+        expect(result.summary).toContain("ordinary-stderr-output");
+        expect(result.summary).not.toBe("VERIFICATION_OUTPUT_REDACTED");
+      },
+    );
+  });
+
   it("redacts the first nonempty segment after empty secret assignments across streams", async () => {
     await withPackageFixture(
       [
