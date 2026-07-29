@@ -74,6 +74,41 @@ describe("ScriptedMockProvider", () => {
     expect(Object.isFrozen(firstResponse.list[0])).toBe(true);
   });
 
+  it("preserves sparse scripted array snapshots after the input changes", async () => {
+    const scriptedResponse = new Array<number>(3);
+    scriptedResponse[0] = 1;
+    scriptedResponse[2] = 3;
+    const provider = new ScriptedMockProvider([scriptedResponse]);
+
+    scriptedResponse[0] = 9;
+    scriptedResponse[1] = 2;
+    scriptedResponse[2] = 9;
+    const snapshot = (await provider.complete(request())) as readonly unknown[];
+
+    expect(snapshot).toHaveLength(3);
+    expect(1 in snapshot).toBe(false);
+    expect(snapshot[0]).toBe(1);
+    expect(snapshot[2]).toBe(3);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+  });
+
+  it("rejects enumerable indexed array accessors without invoking their getter", () => {
+    let getterCalls = 0;
+    const scriptedResponse: unknown[] = [];
+    Object.defineProperty(scriptedResponse, "0", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "must not be read";
+      },
+    });
+
+    const error = captureError(() => new ScriptedMockProvider([scriptedResponse]));
+
+    expect(getterCalls).toBe(0);
+    expectInvalidSnapshot(error);
+  });
+
   it("captures a frozen request snapshot that is insulated from caller mutation", async () => {
     const provider = new ScriptedMockProvider([null]);
     const original = {
