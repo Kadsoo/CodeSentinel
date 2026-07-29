@@ -53,6 +53,9 @@ export function sequenceIds(): () => string {
 }
 
 export type FakeToolOverrides = Readonly<{
+  listFiles?: ToolDispatcher["listFiles"];
+  readFile?: ToolDispatcher["readFile"];
+  searchText?: ToolDispatcher["searchText"];
   verification?: VerificationResult;
   runVerification?: ToolDispatcher["runVerification"];
   currentBaseHash?: string;
@@ -63,8 +66,17 @@ export function fakeTools(overrides: FakeToolOverrides = {}): {
   tools: ToolDispatcher;
   applyApprovedPatch: ReturnType<typeof vi.fn<ToolDispatcher["applyApprovedPatch"]>>;
   getCurrentBaseHash: ReturnType<typeof vi.fn<ToolDispatcher["getCurrentBaseHash"]>>;
+  listFiles: ReturnType<typeof vi.fn<ToolDispatcher["listFiles"]>>;
+  readFile: ReturnType<typeof vi.fn<ToolDispatcher["readFile"]>>;
   runVerification: ReturnType<typeof vi.fn<ToolDispatcher["runVerification"]>>;
+  searchText: ReturnType<typeof vi.fn<ToolDispatcher["searchText"]>>;
 } {
+  const unsupported = async (): Promise<never> => {
+    throw new CodeSentinelCoreError("UNSUPPORTED_TOOL");
+  };
+  const listFiles = vi.fn<ToolDispatcher["listFiles"]>(overrides.listFiles ?? unsupported);
+  const readFile = vi.fn<ToolDispatcher["readFile"]>(overrides.readFile ?? unsupported);
+  const searchText = vi.fn<ToolDispatcher["searchText"]>(overrides.searchText ?? unsupported);
   const runVerification = vi.fn<ToolDispatcher["runVerification"]>(
     overrides.runVerification ?? (async () => overrides.verification ?? failedVerification),
   );
@@ -77,19 +89,24 @@ export function fakeTools(overrides: FakeToolOverrides = {}): {
         Object.freeze({ path: input.path, hash: "b".repeat(64) })),
   );
 
-  const unsupported = async (): Promise<never> => {
-    throw new CodeSentinelCoreError("UNSUPPORTED_TOOL");
-  };
   const tools: ToolDispatcher = Object.freeze({
-    listFiles: unsupported,
-    readFile: unsupported,
-    searchText: unsupported,
+    listFiles,
+    readFile,
+    searchText,
     runVerification,
     getCurrentBaseHash,
     applyApprovedPatch,
   });
 
-  return { tools, applyApprovedPatch, getCurrentBaseHash, runVerification };
+  return {
+    tools,
+    applyApprovedPatch,
+    getCurrentBaseHash,
+    listFiles,
+    readFile,
+    runVerification,
+    searchText,
+  };
 }
 
 export function createdRepairSession(): AgentSession {

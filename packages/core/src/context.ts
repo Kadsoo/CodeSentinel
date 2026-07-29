@@ -12,6 +12,7 @@ const NAMED_SECRET_VALUE =
   /(\b(?:authorization|(?:[a-z][a-z0-9_.-]*)?(?:key|token|secret|password|passwd|pwd|credential))\b\s*[:=]\s*)[^\s,;]+/giu;
 const LONG_KEY_LIKE_VALUE =
   /(?<![a-z0-9+_/-])(?:[a-z0-9+_/-]{30,}={1,2}|[a-z0-9+_/-]{32,}|(?:sk|pk|rk|ghp)_[a-z0-9_-]{12,})(?![a-z0-9+_/-])/giu;
+const CONTROL_OR_FORMAT_CHARACTERS = /[\p{Cc}\p{Cf}]/gu;
 const TRUNCATION_MARKER = "…";
 
 const systemMessage: ProviderMessage = Object.freeze({
@@ -37,10 +38,7 @@ export function buildProviderRequest(input: BuildProviderRequestInput): Provider
     .slice(-MAX_FEEDBACK_ITEMS)
     .map(
       (item) =>
-        `- ${limit(sanitize(item.kind), 96)}: ${limit(
-          sanitize(item.summary),
-          MAX_FEEDBACK_SUMMARY_CHARACTERS,
-        )}`,
+        `- ${limit(sanitize(item.kind), 96)}: ${sanitizeProviderFeedback(item.summary)}`,
     );
   const userContent = limit(
     [
@@ -60,6 +58,17 @@ export function buildProviderRequest(input: BuildProviderRequestInput): Provider
   return Object.freeze({ messages: Object.freeze([systemMessage, userMessage]) });
 }
 
+export function sanitizeProviderFeedback(
+  value: string,
+  maximum = MAX_FEEDBACK_SUMMARY_CHARACTERS,
+): string {
+  const boundedMaximum =
+    Number.isSafeInteger(maximum) && maximum > 0 && maximum <= MAX_FEEDBACK_SUMMARY_CHARACTERS
+      ? maximum
+      : MAX_FEEDBACK_SUMMARY_CHARACTERS;
+  return limit(sanitize(value), boundedMaximum);
+}
+
 function sanitize(value: string): string {
   return removeControlCharacters(value)
     .replace(BEARER_TOKEN, "Bearer [REDACTED]")
@@ -68,19 +77,7 @@ function sanitize(value: string): string {
 }
 
 function removeControlCharacters(value: string): string {
-  const visibleCharacters: string[] = [];
-  for (const character of value) {
-    const codePoint = character.codePointAt(0);
-    if (
-      codePoint !== undefined &&
-      (codePoint <= 31 || codePoint === 127 || (codePoint >= 128 && codePoint <= 159))
-    ) {
-      continue;
-    }
-    visibleCharacters.push(character);
-  }
-
-  return visibleCharacters.join("");
+  return value.replace(CONTROL_OR_FORMAT_CHARACTERS, "");
 }
 
 function limit(value: string, maximum: number): string {

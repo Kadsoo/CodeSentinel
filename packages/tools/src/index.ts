@@ -1,4 +1,4 @@
-export { applyApprovedPatch } from "./patch.js";
+export { applyApprovedPatch, MAX_PATCH_BYTES } from "./patch.js";
 export type {
   ApplyApprovedPatchInput,
   ApplyApprovedPatchResult,

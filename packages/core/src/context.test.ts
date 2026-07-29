@@ -39,6 +39,29 @@ describe("buildProviderRequest", () => {
     expect(content).toContain("[REDACTED]");
   });
 
+  it("removes Unicode format controls before redacting named secret fields", () => {
+    const zeroWidthSecret = "short-secret-value";
+    const bidiSecret = "another-short-secret";
+    const request = buildProviderRequest({
+      taskSummary: "Repair the selected test",
+      phase: "repair",
+      feedback: [
+        {
+          kind: "verification",
+          summary: `token\u200B=${zeroWidthSecret} api\u202E_key=${bidiSecret}`,
+        },
+      ],
+    });
+
+    const content = request.messages.at(-1)?.content ?? "";
+    expect(content).toContain("token=[REDACTED]");
+    expect(content).toContain("api_key=[REDACTED]");
+    expect(content).not.toContain(zeroWidthSecret);
+    expect(content).not.toContain(bidiSecret);
+    expect(content).not.toContain("\u200B");
+    expect(content).not.toContain("\u202E");
+  });
+
   it("redacts long standard and URL-safe Base64-like values", () => {
     const standardBase64 = "AAAAAAAAAAAAAAAA/BBBBBBBBBBBBBB=";
     const urlSafeBase64 = "CCCCCCCCCCCCCCCC_DDDDDDDDDDDDDD-";
