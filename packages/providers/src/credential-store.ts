@@ -51,9 +51,13 @@ function validateReference(reference: unknown): asserts reference is string {
 }
 
 function validateSecret(secret: unknown): asserts secret is string {
-  if (typeof secret !== "string" || secret.trim().length === 0 || secret.length > maxSecretLength) {
+  if (!isValidSecret(secret)) {
     throw invalidInput();
   }
+}
+
+function isValidSecret(secret: unknown): secret is string {
+  return typeof secret === "string" && secret.trim().length > 0 && secret.length <= maxSecretLength;
 }
 
 export class InMemoryCredentialStore implements CredentialStore {
@@ -81,14 +85,25 @@ export class InMemoryCredentialStore implements CredentialStore {
 }
 
 export class WindowsCredentialStore implements CredentialStore {
-  constructor(private readonly keytar: KeytarLike) {}
+  readonly #keytar: KeytarLike;
+
+  constructor(keytar: KeytarLike) {
+    this.#keytar = keytar;
+  }
 
   async set(reference: string, secret: string): Promise<void> {
     validateReference(reference);
     validateSecret(secret);
 
     try {
-      await this.keytar.setPassword(CODESENTINEL_CREDENTIAL_SERVICE, reference, secret);
+      const result: unknown = await this.#keytar.setPassword(
+        CODESENTINEL_CREDENTIAL_SERVICE,
+        reference,
+        secret,
+      );
+      if (result !== undefined) {
+        throw unavailable();
+      }
     } catch {
       throw unavailable();
     }
@@ -98,8 +113,14 @@ export class WindowsCredentialStore implements CredentialStore {
     validateReference(reference);
 
     try {
-      const secret = await this.keytar.getPassword(CODESENTINEL_CREDENTIAL_SERVICE, reference);
-      return typeof secret === "string" ? secret : undefined;
+      const result: unknown = await this.#keytar.getPassword(CODESENTINEL_CREDENTIAL_SERVICE, reference);
+      if (result === null) {
+        return undefined;
+      }
+      if (!isValidSecret(result)) {
+        throw unavailable();
+      }
+      return result;
     } catch {
       throw unavailable();
     }
@@ -113,7 +134,13 @@ export class WindowsCredentialStore implements CredentialStore {
     validateReference(reference);
 
     try {
-      await this.keytar.deletePassword(CODESENTINEL_CREDENTIAL_SERVICE, reference);
+      const result: unknown = await this.#keytar.deletePassword(
+        CODESENTINEL_CREDENTIAL_SERVICE,
+        reference,
+      );
+      if (typeof result !== "boolean") {
+        throw unavailable();
+      }
     } catch {
       throw unavailable();
     }

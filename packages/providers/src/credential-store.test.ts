@@ -33,6 +33,17 @@ async function expectCredentialStoreError(
   expect(String(error)).not.toContain(secretSentinel);
 }
 
+function keytarWithDefaults(
+  overrides: Partial<Record<keyof KeytarLike, unknown>> = {},
+): KeytarLike {
+  return {
+    getPassword: async () => null,
+    setPassword: async () => undefined,
+    deletePassword: async () => true,
+    ...overrides,
+  } as unknown as KeytarLike;
+}
+
 describe("credential-store module", () => {
   it("loads without a real keytar loader and exposes its API through the public entrypoint", async () => {
     const module = await credentials();
@@ -255,5 +266,152 @@ describe("WindowsCredentialStore", () => {
     await expectCredentialStoreError(() => store.get(reference), "CREDENTIAL_UNAVAILABLE");
     await expectCredentialStoreError(() => store.status(reference), "CREDENTIAL_UNAVAILABLE");
     await expectCredentialStoreError(() => store.clear(reference), "CREDENTIAL_UNAVAILABLE");
+  });
+
+  describe("runtime injection hardening", () => {
+    it("keeps its injected keytar port inaccessible to ordinary external tampering", async () => {
+      const { CODESENTINEL_CREDENTIAL_SERVICE, WindowsCredentialStore } = await credentials();
+      const injectedSetPassword = vi.fn(async () => undefined);
+      const interceptedSetPassword = vi.fn(async () => undefined);
+      const store = new WindowsCredentialStore(
+        keytarWithDefaults({ setPassword: injectedSetPassword }),
+      );
+      const externalView = store as unknown as Record<string, unknown>;
+
+      expect(Object.getOwnPropertyNames(store)).not.toContain("keytar");
+      expect(externalView.keytar).toBeUndefined();
+
+      externalView.keytar = keytarWithDefaults({ setPassword: interceptedSetPassword });
+      await store.set(reference, secretSentinel);
+
+      expect(injectedSetPassword).toHaveBeenCalledExactlyOnceWith(
+        CODESENTINEL_CREDENTIAL_SERVICE,
+        reference,
+        secretSentinel,
+      );
+      expect(interceptedSetPassword).not.toHaveBeenCalled();
+    });
+
+    it("accepts a maximum-length nonblank credential returned by keytar", async () => {
+      const { WindowsCredentialStore } = await credentials();
+      const returnedSecret = "a".repeat(4096);
+      const store = new WindowsCredentialStore(
+        keytarWithDefaults({ getPassword: () => returnedSecret }),
+      );
+
+      expect(await store.get(reference)).toBe(returnedSecret);
+      expect(await store.status(reference)).toBe("configured");
+    });
+
+    it.each([
+      ["undefined", undefined],
+      ["object", {}],
+      ["empty string", ""],
+      ["blank string", " \t "],
+      ["too-long string", "a".repeat(4097)],
+    ] as const)("rejects a %s getPassword result", async (_name, result) => {
+      const { WindowsCredentialStore } = await credentials();
+      const store = new WindowsCredentialStore(
+        keytarWithDefaults({ getPassword: () => result }),
+      );
+
+      await expectCredentialStoreError(() => store.get(reference), "CREDENTIAL_UNAVAILABLE");
+    });
+
+    it("does not reinterpret an undefined getPassword result as a missing credential in status", async () => {
+      const { WindowsCredentialStore } = await credentials();
+      const store = new WindowsCredentialStore(
+        keytarWithDefaults({ getPassword: () => undefined }),
+      );
+
+      await expectCredentialStoreError(() => store.status(reference), "CREDENTIAL_UNAVAILABLE");
+    });
+
+    it.each([
+      ["null", null],
+      ["boolean", false],
+      ["string", "unexpected"],
+      ["object", {}],
+    ] as const)("rejects a %s setPassword result", async (_name, result) => {
+      const { WindowsCredentialStore } = await credentials();
+      const store = new WindowsCredentialStore(
+        keytarWithDefaults({ setPassword: () => result }),
+      );
+
+      await expectCredentialStoreError(
+        () => store.set(reference, secretSentinel),
+        "CREDENTIAL_UNAVAILABLE",
+      );
+    });
+
+    it.each([
+      ["undefined", undefined],
+      ["null", null],
+      ["string", "false"],
+      ["object", {}],
+    ] as const)("rejects a %s deletePassword result", async (_name, result) => {
+      const { WindowsCredentialStore } = await credentials();
+      const store = new WindowsCredentialStore(
+        keytarWithDefaults({ deletePassword: () => result }),
+      );
+
+      await expectCredentialStoreError(() => store.clear(reference), "CREDENTIAL_UNAVAILABLE");
+    });
+
+    it.each(["getPassword", "setPassword", "deletePassword"] as const)(
+      "maps a synchronous %s method failure to an unavailable error without disclosing the secret",
+      async (method) => {
+        const { WindowsCredentialStore } = await credentials();
+        const keytar = keytarWithDefaults({
+          getPassword: () => {
+            throw new Error(`getPassword sync failure: ${secretSentinel}`);
+          },
+          setPassword: () => {
+            throw new Error(`setPassword sync failure: ${secretSentinel}`);
+          },
+          deletePassword: () => {
+            throw new Error(`deletePassword sync failure: ${secretSentinel}`);
+          },
+        });
+        const store = new WindowsCredentialStore(keytar);
+
+        if (method === "getPassword") {
+          await expectCredentialStoreError(() => store.get(reference), "CREDENTIAL_UNAVAILABLE");
+        } else if (method === "setPassword") {
+          await expectCredentialStoreError(
+            () => store.set(reference, secretSentinel),
+            "CREDENTIAL_UNAVAILABLE",
+          );
+        } else {
+          await expectCredentialStoreError(() => store.clear(reference), "CREDENTIAL_UNAVAILABLE");
+        }
+      },
+    );
+
+    it.each(["getPassword", "setPassword", "deletePassword"] as const)(
+      "maps a synchronous %s property failure to an unavailable error without disclosing the secret",
+      async (property) => {
+        const { WindowsCredentialStore } = await credentials();
+        const keytar = keytarWithDefaults() as unknown as Record<string, unknown>;
+        Object.defineProperty(keytar, property, {
+          enumerable: true,
+          get() {
+            throw new Error(`${property} property failure: ${secretSentinel}`);
+          },
+        });
+        const store = new WindowsCredentialStore(keytar as unknown as KeytarLike);
+
+        if (property === "getPassword") {
+          await expectCredentialStoreError(() => store.get(reference), "CREDENTIAL_UNAVAILABLE");
+        } else if (property === "setPassword") {
+          await expectCredentialStoreError(
+            () => store.set(reference, secretSentinel),
+            "CREDENTIAL_UNAVAILABLE",
+          );
+        } else {
+          await expectCredentialStoreError(() => store.clear(reference), "CREDENTIAL_UNAVAILABLE");
+        }
+      },
+    );
   });
 });
