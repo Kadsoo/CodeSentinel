@@ -41,6 +41,31 @@ const EVENT_KEYS = Object.freeze([
   "details",
 ] as const);
 
+const APPEND_ACTION_INPUT_KEYS = Object.freeze([
+  "sessionId",
+  "round",
+  "occurredAt",
+  "actionId",
+  "actionKind",
+  "inputSummary",
+] as const);
+
+const SAVE_APPROVAL_INPUT_KEYS = Object.freeze([
+  "sessionId",
+  "round",
+  "occurredAt",
+  "summary",
+  "details",
+] as const);
+
+const APPEND_VERIFICATION_INPUT_KEYS = SAVE_APPROVAL_INPUT_KEYS;
+
+const SAVE_SESSION_MEMORY_INPUT_KEYS = Object.freeze([
+  "sessionId",
+  "summary",
+  "updatedAt",
+] as const);
+
 const TERMINAL_STATES = new Set<SessionState>([
   "completed",
   "blocked",
@@ -585,6 +610,94 @@ function validatedCreateSessionInput(
   }
 }
 
+function actionEventFromInput(input: AppendActionInput): HarnessEvent {
+  try {
+    const snapshot = readOwnDataObject(
+      input,
+      APPEND_ACTION_INPUT_KEYS,
+    );
+    return {
+      sessionId: snapshot.sessionId as string,
+      round: snapshot.round as number,
+      occurredAt: snapshot.occurredAt as string,
+      kind: "action",
+      summary: snapshot.inputSummary as string,
+      details: {
+        actionId: snapshot.actionId as string,
+        actionKind: snapshot.actionKind as ActionKind,
+      },
+    };
+  } catch {
+    throw persistenceError("INVALID_PERSISTENCE_INPUT");
+  }
+}
+
+function approvalEventFromInput(input: SaveApprovalInput): HarnessEvent {
+  try {
+    const snapshot = readOwnDataObject(input, SAVE_APPROVAL_INPUT_KEYS);
+    return {
+      sessionId: snapshot.sessionId as string,
+      round: snapshot.round as number,
+      occurredAt: snapshot.occurredAt as string,
+      kind: "approval",
+      summary: snapshot.summary as string,
+      details: snapshot.details as Extract<
+        HarnessEvent,
+        { kind: "approval" }
+      >["details"],
+    };
+  } catch {
+    throw persistenceError("INVALID_PERSISTENCE_INPUT");
+  }
+}
+
+function verificationEventFromInput(
+  input: AppendVerificationInput,
+): HarnessEvent {
+  try {
+    const snapshot = readOwnDataObject(
+      input,
+      APPEND_VERIFICATION_INPUT_KEYS,
+    );
+    return {
+      sessionId: snapshot.sessionId as string,
+      round: snapshot.round as number,
+      occurredAt: snapshot.occurredAt as string,
+      kind: "verification",
+      summary: snapshot.summary as string,
+      details: snapshot.details as Extract<
+        HarnessEvent,
+        { kind: "verification" }
+      >["details"],
+    };
+  } catch {
+    throw persistenceError("INVALID_PERSISTENCE_INPUT");
+  }
+}
+
+function validatedSessionMemoryInput(
+  input: SaveSessionMemoryInput,
+): PersistedSessionMemory {
+  try {
+    const snapshot = readOwnDataObject(
+      input,
+      SAVE_SESSION_MEMORY_INPUT_KEYS,
+    );
+    assertIdentifier(snapshot.sessionId);
+    assertCanonicalIso(snapshot.updatedAt);
+    if (typeof snapshot.summary !== "string") {
+      throw persistenceError("INVALID_PERSISTENCE_INPUT");
+    }
+    return Object.freeze({
+      sessionId: snapshot.sessionId,
+      summary: redactText(snapshot.summary),
+      updatedAt: snapshot.updatedAt,
+    });
+  } catch {
+    throw persistenceError("INVALID_PERSISTENCE_INPUT");
+  }
+}
+
 function mapSessionRow(value: unknown, expectedId: string): PersistedSession {
   if (typeof value !== "object" || value === null) {
     throw persistenceError("PERSISTENCE_FAILED");
@@ -638,6 +751,41 @@ function mapSessionRow(value: unknown, expectedId: string): PersistedSession {
     createdAt,
     updatedAt,
   });
+}
+
+function mapSessionMemoryRow(
+  value: unknown,
+  expectedSessionId: string,
+): PersistedSessionMemory {
+  try {
+    if (typeof value !== "object" || value === null) {
+      throw persistenceError("PERSISTENCE_FAILED");
+    }
+    const row = value as Readonly<Record<string, unknown>>;
+    const sessionId = row.session_id;
+    const summary = row.summary;
+    const updatedAt = row.updated_at;
+    assertIdentifier(sessionId);
+    assertRedactedStoredSummary(summary);
+    assertCanonicalIso(updatedAt);
+    if (sessionId !== expectedSessionId) {
+      throw persistenceError("PERSISTENCE_FAILED");
+    }
+    return Object.freeze({ sessionId, summary, updatedAt });
+  } catch {
+    throw persistenceError("PERSISTENCE_FAILED");
+  }
+}
+
+function sessionMemoriesEqual(
+  actual: PersistedSessionMemory,
+  expected: PersistedSessionMemory,
+): boolean {
+  return (
+    actual.sessionId === expected.sessionId &&
+    actual.summary === expected.summary &&
+    actual.updatedAt === expected.updatedAt
+  );
 }
 
 function mapActionRecordRow(
@@ -1338,6 +1486,28 @@ export function createSessionRepository(databasePath: string): SessionRepository
       FROM sessions
       WHERE id = ?
     `);
+    const selectSessionMemory = database.prepare(`
+      SELECT
+        session_id,
+        summary,
+        updated_at
+      FROM session_memory
+      WHERE session_id = ?
+    `);
+    const upsertSessionMemory = database.prepare(`
+      INSERT INTO session_memory (
+        session_id,
+        summary,
+        updated_at
+      ) VALUES (
+        @sessionId,
+        @summary,
+        @updatedAt
+      )
+      ON CONFLICT(session_id) DO UPDATE SET
+        summary = excluded.summary,
+        updated_at = excluded.updated_at
+    `);
     const selectActionId = database.prepare(`
       SELECT action_id
       FROM action_records
@@ -1649,6 +1819,15 @@ export function createSessionRepository(databasePath: string): SessionRepository
       FROM verification_runs
       WHERE session_id = ?
     `);
+    const selectMemoryCount = database.prepare(`
+      SELECT count(*) AS count
+      FROM session_memory
+    `);
+    const selectSessionMemoryCount = database.prepare(`
+      SELECT count(*) AS count
+      FROM session_memory
+      WHERE session_id = ?
+    `);
     const selectVerificationByEventId = database.prepare(`
       SELECT
         event_id,
@@ -1750,6 +1929,99 @@ export function createSessionRepository(databasePath: string): SessionRepository
         return "inserted";
       },
     );
+    const saveSessionMemoryTransaction = database.transaction(
+      (input: PersistedSessionMemory): void => {
+        const sessionRow = selectSession.get(input.sessionId);
+        if (sessionRow === undefined) {
+          throw persistenceError("SESSION_NOT_FOUND");
+        }
+        const sessionBefore = mapSessionRow(sessionRow, input.sessionId);
+        const existingRow = selectSessionMemory.get(input.sessionId);
+        const existing =
+          existingRow === undefined
+            ? undefined
+            : mapSessionMemoryRow(existingRow, input.sessionId);
+        const inputTimestamp = canonicalEpoch(input.updatedAt);
+        const existingTimestamp =
+          existing === undefined
+            ? undefined
+            : canonicalEpoch(existing.updatedAt);
+        if (
+          inputTimestamp === undefined ||
+          (existing !== undefined && existingTimestamp === undefined)
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        if (
+          existingTimestamp !== undefined &&
+          inputTimestamp < existingTimestamp
+        ) {
+          throw persistenceError("INVALID_EVENT_SEQUENCE");
+        }
+
+        const globalCountBefore = storedCount(selectMemoryCount.get());
+        const sessionCountBefore = storedCount(
+          selectSessionMemoryCount.get(input.sessionId),
+        );
+        const globalTimelineCountBefore = storedCount(
+          selectGlobalTimelineCount.get(),
+        );
+        const sessionTimelineCountBefore = storedCount(
+          selectSessionTimelineCount.get(input.sessionId),
+        );
+        if (
+          sessionCountBefore !== (existing === undefined ? 0 : 1)
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+
+        const changes = upsertSessionMemory.run(input).changes;
+        if (changes !== 1) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+
+        const persistedRow = selectSessionMemory.get(input.sessionId);
+        if (persistedRow === undefined) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const persisted = mapSessionMemoryRow(
+          persistedRow,
+          input.sessionId,
+        );
+        if (!sessionMemoriesEqual(persisted, input)) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+
+        const globalCountAfter = storedCount(selectMemoryCount.get());
+        const sessionCountAfter = storedCount(
+          selectSessionMemoryCount.get(input.sessionId),
+        );
+        const expectedDelta = existing === undefined ? 1 : 0;
+        if (
+          globalCountAfter !== globalCountBefore + expectedDelta ||
+          sessionCountAfter !== 1
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const sessionAfterRow = selectSession.get(input.sessionId);
+        if (sessionAfterRow === undefined) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const sessionAfter = mapSessionRow(
+          sessionAfterRow,
+          input.sessionId,
+        );
+        if (
+          !sessionsEqual(sessionAfter, sessionBefore) ||
+          storedCount(selectGlobalTimelineCount.get()) !==
+            globalTimelineCountBefore ||
+          storedCount(selectSessionTimelineCount.get(input.sessionId)) !==
+            sessionTimelineCountBefore
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+      },
+    );
     const appendTransaction = database.transaction((event: HarnessEvent): void => {
       const sessionRow = selectSession.get(event.sessionId);
       if (sessionRow === undefined) {
@@ -1760,6 +2032,12 @@ export function createSessionRepository(databasePath: string): SessionRepository
         session = mapSessionRow(sessionRow, event.sessionId);
       } catch {
         throw persistenceError("PERSISTENCE_FAILED");
+      }
+      if (
+        event.kind === "action" &&
+        selectActionId.get(event.details.actionId) !== undefined
+      ) {
+        throw persistenceError("DUPLICATE_RECORD");
       }
       validateEventSequence(event, session);
 
@@ -1786,11 +2064,7 @@ export function createSessionRepository(databasePath: string): SessionRepository
         throw persistenceError("INVALID_EVENT_SEQUENCE");
       }
 
-      if (event.kind === "action") {
-        if (selectActionId.get(event.details.actionId) !== undefined) {
-          throw persistenceError("DUPLICATE_RECORD");
-        }
-      } else if (event.kind === "tool_result") {
+      if (event.kind === "tool_result") {
         if (action === undefined) {
           throw persistenceError("INVALID_EVENT_SEQUENCE");
         }
@@ -2199,6 +2473,18 @@ export function createSessionRepository(databasePath: string): SessionRepository
       mutationInProgress = false;
     }
 
+    function appendInputWhileMutating(event: HarnessEvent): void {
+      const validated = validateAndRedactEvent(event);
+      try {
+        appendTransaction.immediate(validated);
+      } catch (error) {
+        if (isPersistenceError(error)) {
+          throw error;
+        }
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+    }
+
     async function createSession(
       input: CreatePersistedSessionInput,
     ): Promise<void> {
@@ -2243,9 +2529,53 @@ export function createSessionRepository(databasePath: string): SessionRepository
       assertOpen();
       beginMutation();
       try {
-        const validated = validateAndRedactEvent(event);
+        appendInputWhileMutating(event);
+      } finally {
+        endMutation();
+      }
+    }
+
+    async function appendAction(input: AppendActionInput): Promise<void> {
+      assertOpen();
+      beginMutation();
+      try {
+        appendInputWhileMutating(actionEventFromInput(input));
+      } finally {
+        endMutation();
+      }
+    }
+
+    async function saveApproval(input: SaveApprovalInput): Promise<void> {
+      assertOpen();
+      beginMutation();
+      try {
+        appendInputWhileMutating(approvalEventFromInput(input));
+      } finally {
+        endMutation();
+      }
+    }
+
+    async function appendVerification(
+      input: AppendVerificationInput,
+    ): Promise<void> {
+      assertOpen();
+      beginMutation();
+      try {
+        appendInputWhileMutating(verificationEventFromInput(input));
+      } finally {
+        endMutation();
+      }
+    }
+
+    async function saveSessionMemory(
+      input: SaveSessionMemoryInput,
+    ): Promise<void> {
+      assertOpen();
+      beginMutation();
+      try {
+        const validated = validatedSessionMemoryInput(input);
         try {
-          appendTransaction.immediate(validated);
+          saveSessionMemoryTransaction.immediate(validated);
         } catch (error) {
           if (isPersistenceError(error)) {
             throw error;
@@ -2257,40 +2587,22 @@ export function createSessionRepository(databasePath: string): SessionRepository
       }
     }
 
-    async function appendAction(input: AppendActionInput): Promise<void> {
-      assertOpen();
-      void input;
-      throw persistenceError("PERSISTENCE_FAILED");
-    }
-
-    async function saveApproval(input: SaveApprovalInput): Promise<void> {
-      assertOpen();
-      void input;
-      throw persistenceError("PERSISTENCE_FAILED");
-    }
-
-    async function appendVerification(
-      input: AppendVerificationInput,
-    ): Promise<void> {
-      assertOpen();
-      void input;
-      throw persistenceError("PERSISTENCE_FAILED");
-    }
-
-    async function saveSessionMemory(
-      input: SaveSessionMemoryInput,
-    ): Promise<void> {
-      assertOpen();
-      void input;
-      throw persistenceError("PERSISTENCE_FAILED");
-    }
-
     async function loadSessionMemory(
       sessionId: string,
     ): Promise<PersistedSessionMemory | undefined> {
       assertOpen();
-      void sessionId;
-      throw persistenceError("PERSISTENCE_FAILED");
+      assertIdentifier(sessionId);
+      try {
+        if (selectSessionId.get(sessionId) === undefined) {
+          return undefined;
+        }
+        const row = selectSessionMemory.get(sessionId);
+        return row === undefined
+          ? undefined
+          : mapSessionMemoryRow(row, sessionId);
+      } catch {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
     }
 
     async function loadTimeline(

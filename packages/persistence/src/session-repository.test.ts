@@ -10,8 +10,13 @@ import type {
 import {
   CodeSentinelPersistenceError,
   createSessionRepository,
+  MAX_PERSISTED_SUMMARY_CHARACTERS,
   MAX_PERSISTED_TEXT_INPUT_CHARACTERS,
+  type AppendActionInput,
+  type AppendVerificationInput,
   type CreatePersistedSessionInput,
+  type SaveApprovalInput,
+  type SaveSessionMemoryInput,
   type SessionRepository,
 } from "./index.js";
 import { PendingPatchStore } from "../../core/src/pending-patch-store.js";
@@ -180,6 +185,59 @@ function approvalEvent(
       expiresAt: 2,
       ...overrides,
     },
+  };
+}
+
+function appendActionInput(
+  overrides: Partial<AppendActionInput> = {},
+): AppendActionInput {
+  return {
+    sessionId: SESSION_ID,
+    round: 1,
+    occurredAt: at(1),
+    actionId: ACTION_ID,
+    actionKind: "finish",
+    inputSummary: "finish",
+    ...overrides,
+  };
+}
+
+function saveApprovalInput(
+  overrides: Partial<SaveApprovalInput> = {},
+): SaveApprovalInput {
+  const event = approvalEvent(1, at(4));
+  return {
+    sessionId: event.sessionId,
+    round: event.round,
+    occurredAt: event.occurredAt,
+    summary: event.summary,
+    details: event.details,
+    ...overrides,
+  };
+}
+
+function appendVerificationInput(
+  overrides: Partial<AppendVerificationInput> = {},
+): AppendVerificationInput {
+  const event = verificationEvent(0, at(1));
+  return {
+    sessionId: event.sessionId,
+    round: event.round,
+    occurredAt: event.occurredAt,
+    summary: event.summary,
+    details: event.details,
+    ...overrides,
+  };
+}
+
+function saveMemoryInput(
+  overrides: Partial<SaveSessionMemoryInput> = {},
+): SaveSessionMemoryInput {
+  return {
+    sessionId: SESSION_ID,
+    summary: "remembered context",
+    updatedAt: at(1),
+    ...overrides,
   };
 }
 
@@ -1550,6 +1608,538 @@ describe("session event persistence", () => {
         ),
       ).toEqual({ count: 2 });
       expect(await repository.loadTimeline(SESSION_ID)).toHaveLength(5);
+    });
+  });
+
+  it("uses appendAction as exactly one narrow action event", async () => {
+    await withRepository(async (repository) => {
+      await createRunningSession(repository);
+      const timelineBefore = await repository.loadTimeline(SESSION_ID);
+
+      await repository.appendAction(appendActionInput());
+
+      const timeline = await repository.loadTimeline(SESSION_ID);
+      expect(timeline.slice(timelineBefore.length)).toEqual([
+        actionEvent(1, at(1), "finish", ACTION_ID, "finish"),
+      ]);
+      await expect(repository.loadSession(SESSION_ID)).resolves.toMatchObject({
+        round: 1,
+        state: "running",
+        updatedAt: at(1),
+      });
+    });
+  });
+
+  it("makes direct and typed approval entries exactly equivalent", async () => {
+    const directTimeline = await withRepository(async (repository) => {
+      await createAwaitingApprovalSession(repository);
+      await repository.append(approvalEvent(1, at(4)));
+      return repository.loadTimeline(SESSION_ID);
+    });
+    const typedTimeline = await withRepository(async (repository) => {
+      await createAwaitingApprovalSession(repository);
+      const before = (await repository.loadTimeline(SESSION_ID)).length;
+      await repository.saveApproval(saveApprovalInput());
+      const timeline = await repository.loadTimeline(SESSION_ID);
+      expect(timeline).toHaveLength(before + 1);
+      return timeline;
+    });
+
+    expect(typedTimeline).toEqual(directTimeline);
+  });
+
+  it("makes direct and typed verification entries exactly equivalent", async () => {
+    const directTimeline = await withRepository(async (repository) => {
+      await repository.createSession(validSession());
+      await repository.append(verificationEvent(0, at(1)));
+      return repository.loadTimeline(SESSION_ID);
+    });
+    const typedTimeline = await withRepository(async (repository) => {
+      await repository.createSession(validSession());
+      await repository.appendVerification(appendVerificationInput());
+      return repository.loadTimeline(SESSION_ID);
+    });
+
+    expect(typedTimeline).toEqual(directTimeline);
+    expect(typedTimeline).toHaveLength(1);
+  });
+
+  it("classifies direct then typed action replay by stable id without partial writes", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository);
+      await repository.append(
+        actionEvent(1, at(1), "finish", ACTION_ID, "finish"),
+      );
+      const before = businessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.appendAction(appendActionInput()),
+        "DUPLICATE_RECORD",
+      );
+
+      expect(businessSnapshot(databasePath)).toEqual(before);
+    });
+  });
+
+  it("classifies typed then direct action replay by stable id without partial writes", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository);
+      await repository.appendAction(appendActionInput());
+      const before = businessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.append(
+          actionEvent(1, at(1), "finish", ACTION_ID, "finish"),
+        ),
+        "DUPLICATE_RECORD",
+      );
+
+      expect(businessSnapshot(databasePath)).toEqual(before);
+    });
+  });
+
+  it("classifies direct then typed approval replay by stable id without partial writes", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createAwaitingApprovalSession(repository);
+      await repository.append(approvalEvent(1, at(4)));
+      const before = businessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.saveApproval(saveApprovalInput()),
+        "DUPLICATE_RECORD",
+      );
+
+      expect(businessSnapshot(databasePath)).toEqual(before);
+    });
+  });
+
+  it("classifies typed then direct approval replay by stable id without partial writes", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createAwaitingApprovalSession(repository);
+      await repository.saveApproval(saveApprovalInput());
+      const before = businessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.append(approvalEvent(1, at(4))),
+        "DUPLICATE_RECORD",
+      );
+
+      expect(businessSnapshot(databasePath)).toEqual(before);
+    });
+  });
+
+  it("allows two legitimately identical typed verification runs", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await repository.createSession(validSession());
+      const input = appendVerificationInput();
+
+      await repository.appendVerification(input);
+      await repository.appendVerification(input);
+
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual([
+        verificationEvent(0, at(1)),
+        verificationEvent(0, at(1)),
+      ]);
+      expect(
+        inspectDatabase(databasePath, (database) =>
+          database
+            .prepare("SELECT count(*) AS count FROM verification_runs")
+            .get(),
+        ),
+      ).toEqual({ count: 2 });
+    });
+  });
+
+  it("redacts and bounds memory without changing session or timeline state", async () => {
+    await withRepository(async (repository) => {
+      await createRunningSession(repository);
+      const secret = "sk-proj-memory-secret-1234";
+      const sessionBefore = await repository.loadSession(SESSION_ID);
+      const timelineBefore = await repository.loadTimeline(SESSION_ID);
+
+      await repository.saveSessionMemory(
+        saveMemoryInput({
+          summary:
+            `Authorization: Bearer ${secret} ` +
+            "safe ".repeat(MAX_PERSISTED_SUMMARY_CHARACTERS),
+        }),
+      );
+
+      const memory = await repository.loadSessionMemory(SESSION_ID);
+      expect(memory).toEqual({
+        sessionId: SESSION_ID,
+        summary: expect.stringContaining("[REDACTED]"),
+        updatedAt: at(1),
+      });
+      expect(memory?.summary).toHaveLength(
+        MAX_PERSISTED_SUMMARY_CHARACTERS,
+      );
+      expect(Object.isFrozen(memory)).toBe(true);
+      expect(JSON.stringify(memory)).not.toContain(secret);
+      expect(await repository.loadSession(SESSION_ID)).toEqual(
+        sessionBefore,
+      );
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual(
+        timelineBefore,
+      );
+    });
+  });
+
+  it("returns undefined for unknown memory and rejects unknown memory writes", async () => {
+    await withRepository(async (repository) => {
+      await expect(
+        repository.loadSessionMemory("unknown-session"),
+      ).resolves.toBeUndefined();
+      await expectRejected(
+        repository.saveSessionMemory(
+          saveMemoryInput({ sessionId: "unknown-session" }),
+        ),
+        "SESSION_NOT_FOUND",
+      );
+      await expect(
+        repository.loadSessionMemory("unknown-session"),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  it("allows equal and newer memory timestamps but preserves memory on an older write", async () => {
+    await withRepository(async (repository) => {
+      await repository.createSession(validSession());
+      await repository.saveSessionMemory(
+        saveMemoryInput({ summary: "first", updatedAt: at(2) }),
+      );
+      await repository.saveSessionMemory(
+        saveMemoryInput({ summary: "equal", updatedAt: at(2) }),
+      );
+      await expect(repository.loadSessionMemory(SESSION_ID)).resolves.toEqual({
+        sessionId: SESSION_ID,
+        summary: "equal",
+        updatedAt: at(2),
+      });
+
+      await expectRejected(
+        repository.saveSessionMemory(
+          saveMemoryInput({ summary: "older", updatedAt: at(1) }),
+        ),
+        "INVALID_EVENT_SEQUENCE",
+      );
+      await expect(repository.loadSessionMemory(SESSION_ID)).resolves.toEqual({
+        sessionId: SESSION_ID,
+        summary: "equal",
+        updatedAt: at(2),
+      });
+
+      await repository.saveSessionMemory(
+        saveMemoryInput({ summary: "newer", updatedAt: at(3) }),
+      );
+      await expect(repository.loadSessionMemory(SESSION_ID)).resolves.toEqual({
+        sessionId: SESSION_ID,
+        summary: "newer",
+        updatedAt: at(3),
+      });
+    });
+  });
+
+  it("compares four-digit and extended-year memory timestamps by numeric epoch", async () => {
+    await withRepository(async (repository) => {
+      await repository.createSession(validSession());
+      await repository.saveSessionMemory(
+        saveMemoryInput({
+          summary: "extended",
+          updatedAt: "+010000-01-01T00:00:00.000Z",
+        }),
+      );
+
+      await expectRejected(
+        repository.saveSessionMemory(
+          saveMemoryInput({
+            summary: "lexically-later-but-older",
+            updatedAt: "9999-12-31T23:59:59.999Z",
+          }),
+        ),
+        "INVALID_EVENT_SEQUENCE",
+      );
+      await expect(repository.loadSessionMemory(SESSION_ID)).resolves.toEqual({
+        sessionId: SESSION_ID,
+        summary: "extended",
+        updatedAt: "+010000-01-01T00:00:00.000Z",
+      });
+    });
+  });
+
+  it.each([
+    [
+      "noncanonical time",
+      saveMemoryInput({ updatedAt: "2026-07-30T00:00:01Z" }),
+    ],
+    [
+      "oversized summary",
+      saveMemoryInput({
+        summary: "x".repeat(MAX_PERSISTED_TEXT_INPUT_CHARACTERS + 1),
+      }),
+    ],
+    [
+      "extra key",
+      { ...saveMemoryInput(), extra: SENTINEL },
+    ],
+    [
+      "non-string summary",
+      { ...saveMemoryInput(), summary: 1 },
+    ],
+  ] as const)("rejects invalid memory input: %s", async (_label, input) => {
+    await withRepository(async (repository) => {
+      await repository.createSession(validSession());
+      const sessionBefore = await repository.loadSession(SESSION_ID);
+
+      await expectRejected(
+        repository.saveSessionMemory(
+          input as unknown as SaveSessionMemoryInput,
+        ),
+        "INVALID_PERSISTENCE_INPUT",
+      );
+      await expect(
+        repository.loadSessionMemory(SESSION_ID),
+      ).resolves.toBeUndefined();
+      expect(await repository.loadSession(SESSION_ID)).toEqual(
+        sessionBefore,
+      );
+    });
+  });
+
+  it("rejects typed-entry and memory Proxies without traps or reentry", async () => {
+    const cases: ReadonlyArray<Readonly<{
+      label: string;
+      setup(repository: SessionRepository): Promise<void>;
+      input(): object;
+      invoke(repository: SessionRepository, input: object): Promise<void>;
+    }>> = [
+      {
+        label: "action",
+        setup: createRunningSession,
+        input: appendActionInput,
+        invoke: (repository, input) =>
+          repository.appendAction(input as AppendActionInput),
+      },
+      {
+        label: "approval",
+        setup: createAwaitingApprovalSession,
+        input: saveApprovalInput,
+        invoke: (repository, input) =>
+          repository.saveApproval(input as SaveApprovalInput),
+      },
+      {
+        label: "verification",
+        setup: (repository) =>
+          repository.createSession(validSession()),
+        input: appendVerificationInput,
+        invoke: (repository, input) =>
+          repository.appendVerification(input as AppendVerificationInput),
+      },
+      {
+        label: "memory",
+        setup: (repository) =>
+          repository.createSession(validSession()),
+        input: saveMemoryInput,
+        invoke: (repository, input) =>
+          repository.saveSessionMemory(input as SaveSessionMemoryInput),
+      },
+    ];
+
+    for (const entry of cases) {
+      await withRepository(async (repository) => {
+        await entry.setup(repository);
+        const sessionBefore = await repository.loadSession(SESSION_ID);
+        const timelineBefore = await repository.loadTimeline(SESSION_ID);
+        let trapCalls = 0;
+        let innerAppend: Promise<void> | undefined;
+        const input = new Proxy(entry.input(), {
+          get(): never {
+            trapCalls += 1;
+            innerAppend = repository.append(
+              stateEvent(0, at(10), "failed"),
+            );
+            void innerAppend.catch(() => undefined);
+            throw new Error(SENTINEL);
+          },
+        });
+
+        const error = await expectRejected(
+          entry.invoke(repository, input),
+          "INVALID_PERSISTENCE_INPUT",
+        );
+        expect(visibleErrorText(error), entry.label).not.toContain(SENTINEL);
+        expect(trapCalls, entry.label).toBe(0);
+        expect(innerAppend, entry.label).toBeUndefined();
+        expect(await repository.loadSession(SESSION_ID), entry.label).toEqual(
+          sessionBefore,
+        );
+        expect(
+          await repository.loadTimeline(SESSION_ID),
+          entry.label,
+        ).toEqual(timelineBefore);
+      });
+    }
+  });
+
+  it("rejects typed-entry and memory accessors without invoking them", async () => {
+    const cases: ReadonlyArray<Readonly<{
+      label: string;
+      field: string;
+      setup(repository: SessionRepository): Promise<void>;
+      input(): object;
+      invoke(repository: SessionRepository, input: object): Promise<void>;
+    }>> = [
+      {
+        label: "action",
+        field: "inputSummary",
+        setup: createRunningSession,
+        input: appendActionInput,
+        invoke: (repository, input) =>
+          repository.appendAction(input as AppendActionInput),
+      },
+      {
+        label: "approval",
+        field: "summary",
+        setup: createAwaitingApprovalSession,
+        input: saveApprovalInput,
+        invoke: (repository, input) =>
+          repository.saveApproval(input as SaveApprovalInput),
+      },
+      {
+        label: "verification",
+        field: "summary",
+        setup: (repository) =>
+          repository.createSession(validSession()),
+        input: appendVerificationInput,
+        invoke: (repository, input) =>
+          repository.appendVerification(input as AppendVerificationInput),
+      },
+      {
+        label: "memory",
+        field: "summary",
+        setup: (repository) =>
+          repository.createSession(validSession()),
+        input: saveMemoryInput,
+        invoke: (repository, input) =>
+          repository.saveSessionMemory(input as SaveSessionMemoryInput),
+      },
+    ];
+
+    for (const entry of cases) {
+      await withRepository(async (repository) => {
+        await entry.setup(repository);
+        const sessionBefore = await repository.loadSession(SESSION_ID);
+        const timelineBefore = await repository.loadTimeline(SESSION_ID);
+        const input = entry.input();
+        let getterCalls = 0;
+        let innerAppend: Promise<void> | undefined;
+        Object.defineProperty(input, entry.field, {
+          enumerable: true,
+          configurable: true,
+          get(): never {
+            getterCalls += 1;
+            innerAppend = repository.append(
+              stateEvent(0, at(10), "failed"),
+            );
+            void innerAppend.catch(() => undefined);
+            throw new Error(SENTINEL);
+          },
+        });
+
+        const error = await expectRejected(
+          entry.invoke(repository, input),
+          "INVALID_PERSISTENCE_INPUT",
+        );
+        expect(visibleErrorText(error), entry.label).not.toContain(SENTINEL);
+        expect(getterCalls, entry.label).toBe(0);
+        expect(innerAppend, entry.label).toBeUndefined();
+        expect(await repository.loadSession(SESSION_ID), entry.label).toEqual(
+          sessionBefore,
+        );
+        expect(
+          await repository.loadTimeline(SESSION_ID),
+          entry.label,
+        ).toEqual(timelineBefore);
+      });
+    }
+  });
+
+  it("returns fixed PERSISTENCE_FAILED for corrupted stored memory", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await repository.createSession(validSession());
+      await repository.saveSessionMemory(saveMemoryInput());
+      inspectDatabase(databasePath, (database) => {
+        database
+          .prepare(
+            "UPDATE session_memory SET summary = ? WHERE session_id = ?",
+          )
+          .run(`token=${SENTINEL}`, SESSION_ID);
+      });
+
+      const error = await expectRejected(
+        repository.loadSessionMemory(SESSION_ID),
+        "PERSISTENCE_FAILED",
+      );
+      expect(visibleErrorText(error)).not.toContain(SENTINEL);
+    });
+  });
+
+  it("rolls back memory when an AFTER trigger makes changes=1 a false success", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await repository.createSession(validSession());
+      const sessionBefore = await repository.loadSession(SESSION_ID);
+      inspectDatabase(databasePath, (database) => {
+        database.exec(`
+          CREATE TRIGGER corrupt_memory_after_write
+          AFTER INSERT ON session_memory
+          BEGIN
+            DELETE FROM session_memory
+            WHERE session_id = NEW.session_id;
+          END
+        `);
+      });
+
+      await expectRejected(
+        repository.saveSessionMemory(saveMemoryInput()),
+        "PERSISTENCE_FAILED",
+      );
+      await expect(
+        repository.loadSessionMemory(SESSION_ID),
+      ).resolves.toBeUndefined();
+      expect(await repository.loadSession(SESSION_ID)).toEqual(
+        sessionBefore,
+      );
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual([]);
+    });
+  });
+
+  it("rolls back memory when an AFTER trigger mutates the owning session", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await repository.createSession(validSession());
+      const sessionBefore = await repository.loadSession(SESSION_ID);
+      inspectDatabase(databasePath, (database) => {
+        database.exec(`
+          CREATE TRIGGER corrupt_session_from_memory
+          AFTER INSERT ON session_memory
+          BEGIN
+            UPDATE sessions
+            SET updated_at = '${at(2)}'
+            WHERE id = NEW.session_id;
+          END
+        `);
+      });
+
+      await expectRejected(
+        repository.saveSessionMemory(saveMemoryInput()),
+        "PERSISTENCE_FAILED",
+      );
+      await expect(
+        repository.loadSessionMemory(SESSION_ID),
+      ).resolves.toBeUndefined();
+      expect(await repository.loadSession(SESSION_ID)).toEqual(
+        sessionBefore,
+      );
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual([]);
     });
   });
 
