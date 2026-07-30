@@ -268,6 +268,22 @@ function inspectDatabase<T>(
   }
 }
 
+function businessSnapshot(databasePath: string): Readonly<{
+  sessions: readonly unknown[];
+  timeline: readonly unknown[];
+  actions: readonly unknown[];
+}> {
+  return inspectDatabase(databasePath, (database) => ({
+    sessions: database.prepare("SELECT * FROM sessions ORDER BY id").all(),
+    timeline: database
+      .prepare("SELECT * FROM timeline_events ORDER BY event_id")
+      .all(),
+    actions: database
+      .prepare("SELECT * FROM action_records ORDER BY action_id")
+      .all(),
+  }));
+}
+
 async function createRunningSession(
   repository: SessionRepository,
   overrides: Partial<CreatePersistedSessionInput> = {},
@@ -391,6 +407,27 @@ describe("session event persistence", () => {
         round: 1,
         updatedAt: at(0),
       });
+    });
+  });
+
+  it("rejects an earlier four-digit-year event after an extended-year session timestamp", async () => {
+    await withRepository(async (repository) => {
+      const createdAt = "+010000-01-01T00:00:00.000Z";
+      await repository.createSession(validSession({ createdAt }));
+      const sessionBefore = await repository.loadSession(SESSION_ID);
+
+      await expectRejected(
+        repository.append(
+          stateEvent(
+            0,
+            "9999-12-31T23:59:59.999Z",
+            "running",
+          ),
+        ),
+        "INVALID_EVENT_SEQUENCE",
+      );
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual([]);
+      expect(await repository.loadSession(SESSION_ID)).toEqual(sessionBefore);
     });
   });
 
@@ -1109,6 +1146,125 @@ describe("session event persistence", () => {
 
   it.each([
     [
+      "event",
+      () => new Proxy(stateEvent(0, at(1)), {}),
+    ],
+    [
+      "details",
+      () => ({
+        ...stateEvent(0, at(1)),
+        details: new Proxy({ state: "running" as const }, {}),
+      }),
+    ],
+  ] as const)("rejects a transparent Proxy %s without writing", async (_label, build) => {
+    await withRepository(async (repository) => {
+      await repository.createSession(validSession());
+      const sessionBefore = await repository.loadSession(SESSION_ID);
+
+      await expectRejected(
+        repository.append(build() as HarnessEvent),
+        "INVALID_PERSISTENCE_INPUT",
+      );
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual([]);
+      expect(await repository.loadSession(SESSION_ID)).toEqual(sessionBefore);
+    });
+  });
+
+  it.each([
+    "getPrototypeOf",
+    "ownKeys",
+    "getOwnPropertyDescriptor",
+  ] as const)(
+    "rejects a Proxy %s reentry trap before it can append",
+    async (trapKind) => {
+      await withRepository(async (repository) => {
+        await repository.createSession(validSession());
+        const sessionBefore = await repository.loadSession(SESSION_ID);
+        let trapCalls = 0;
+        let innerAppend: Promise<void> | undefined;
+        const reenter = (): never => {
+          trapCalls += 1;
+          innerAppend = repository.append(stateEvent(0, at(1)));
+          void innerAppend.catch(() => undefined);
+          throw new Error(SENTINEL);
+        };
+        const handler: ProxyHandler<
+          Extract<HarnessEvent, { kind: "state" }>
+        > = {};
+        switch (trapKind) {
+          case "getPrototypeOf":
+            handler.getPrototypeOf = reenter;
+            break;
+          case "ownKeys":
+            handler.ownKeys = reenter;
+            break;
+          case "getOwnPropertyDescriptor":
+            handler.getOwnPropertyDescriptor = reenter;
+            break;
+        }
+        const input = new Proxy(stateEvent(0, at(2)), handler);
+
+        const error = await expectRejected(
+          repository.append(input),
+          "INVALID_PERSISTENCE_INPUT",
+        );
+        if (innerAppend !== undefined) {
+          await innerAppend.catch(() => undefined);
+        }
+        expect(visibleErrorText(error)).not.toContain(SENTINEL);
+        expect(trapCalls).toBe(0);
+        expect(await repository.loadTimeline(SESSION_ID)).toEqual([]);
+        expect(await repository.loadSession(SESSION_ID)).toEqual(
+          sessionBefore,
+        );
+      });
+    },
+  );
+
+  it("blocks append reentry from createSession input validation and releases the guard", async () => {
+    await withRepository(async (repository) => {
+      await createRunningSession(repository);
+      const timelineBefore = await repository.loadTimeline(SESSION_ID);
+      const sessionBefore = await repository.loadSession(SESSION_ID);
+      let innerAppend: Promise<void> | undefined;
+      const reentrantInput = {
+        get id(): string {
+          innerAppend = repository.append(actionEvent(1, at(1)));
+          void innerAppend.catch(() => undefined);
+          throw new Error(SENTINEL);
+        },
+        taskKind: "test_repair",
+        state: "created",
+        round: 0,
+        workspaceId: "workspace-reentrant",
+        providerId: "provider-reentrant",
+        verificationCommandId: "command-reentrant",
+        createdAt: at(1),
+      } as CreatePersistedSessionInput;
+
+      const error = await expectRejected(
+        repository.createSession(reentrantInput),
+        "INVALID_PERSISTENCE_INPUT",
+      );
+      expect(visibleErrorText(error)).not.toContain(SENTINEL);
+      expect(innerAppend).toBeDefined();
+      if (innerAppend !== undefined) {
+        await expectRejected(innerAppend, "INVALID_PERSISTENCE_INPUT");
+      }
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual(
+        timelineBefore,
+      );
+      expect(await repository.loadSession(SESSION_ID)).toEqual(sessionBefore);
+
+      await repository.append(actionEvent(1, at(2)));
+      expect(await repository.loadTimeline(SESSION_ID)).toHaveLength(
+        timelineBefore.length + 1,
+      );
+    });
+  });
+
+  it.each([
+    [
       "invalid round",
       () => ({ ...stateEvent(0, at(1)), round: 0.5 }),
     ],
@@ -1336,6 +1492,146 @@ describe("session event persistence", () => {
     },
   );
 
+  it.each([
+    [
+      "AFTER timeline delete",
+      async (repository: SessionRepository) => {
+        await repository.createSession(validSession());
+      },
+      `
+        CREATE TRIGGER corrupt_after_write
+        AFTER INSERT ON timeline_events
+        BEGIN
+          DELETE FROM timeline_events WHERE event_id = NEW.event_id;
+        END
+      `,
+      (repository: SessionRepository) =>
+        repository.append(stateEvent(0, at(1))),
+    ],
+    [
+      "AFTER timeline summary modification",
+      async (repository: SessionRepository) => {
+        await repository.createSession(validSession());
+      },
+      `
+        CREATE TRIGGER corrupt_after_write
+        AFTER INSERT ON timeline_events
+        BEGIN
+          UPDATE timeline_events
+          SET summary = '${SENTINEL}'
+          WHERE event_id = NEW.event_id;
+        END
+      `,
+      (repository: SessionRepository) =>
+        repository.append(stateEvent(0, at(1))),
+    ],
+    [
+      "AFTER action-record delete",
+      async (repository: SessionRepository) => {
+        await createRunningSession(repository);
+      },
+      `
+        CREATE TRIGGER corrupt_after_write
+        AFTER INSERT ON action_records
+        BEGIN
+          DELETE FROM action_records WHERE action_id = NEW.action_id;
+        END
+      `,
+      (repository: SessionRepository) =>
+        repository.append(actionEvent(1, at(1))),
+    ],
+    [
+      "AFTER policy modification",
+      async (repository: SessionRepository) => {
+        await createRunningSession(repository);
+        await repository.append(actionEvent(1, at(1)));
+      },
+      `
+        CREATE TRIGGER corrupt_after_write
+        AFTER UPDATE OF policy_decision ON action_records
+        BEGIN
+          UPDATE action_records
+          SET policy_decision = 'deny'
+          WHERE action_id = NEW.action_id;
+        END
+      `,
+      (repository: SessionRepository) =>
+        repository.append(policyEvent(1, at(2), "allow")),
+    ],
+    [
+      "AFTER result modification",
+      async (repository: SessionRepository) => {
+        await appendValidBrowsePrefix(repository);
+      },
+      `
+        CREATE TRIGGER corrupt_after_write
+        AFTER UPDATE OF result_summary ON action_records
+        BEGIN
+          UPDATE action_records
+          SET result_summary = '${SENTINEL}'
+          WHERE action_id = NEW.action_id;
+        END
+      `,
+      (repository: SessionRepository) =>
+        repository.append(toolEvent(1, at(3))),
+    ],
+    [
+      "AFTER session-state modification",
+      async (repository: SessionRepository) => {
+        await repository.createSession(validSession());
+      },
+      `
+        CREATE TRIGGER corrupt_after_write
+        AFTER UPDATE OF state ON sessions
+        BEGIN
+          UPDATE sessions SET state = 'failed' WHERE id = NEW.id;
+        END
+      `,
+      (repository: SessionRepository) =>
+        repository.append(stateEvent(0, at(1))),
+    ],
+    [
+      "AFTER session-timestamp modification",
+      async (repository: SessionRepository) => {
+        await createRunningSession(repository);
+        await repository.append(actionEvent(1, at(1)));
+      },
+      `
+        CREATE TRIGGER corrupt_after_write
+        AFTER UPDATE OF updated_at ON sessions
+        BEGIN
+          UPDATE sessions SET updated_at = '${at(1)}' WHERE id = NEW.id;
+        END
+      `,
+      (repository: SessionRepository) =>
+        repository.append(policyEvent(1, at(2))),
+    ],
+  ] as const)(
+    "rolls back when %s makes changes=1 a false success",
+    async (_label, setup, triggerSql, append) => {
+      await withFileRepository(async (repository, databasePath) => {
+        await setup(repository);
+        const rawBefore = businessSnapshot(databasePath);
+        const timelineBefore = await repository.loadTimeline(SESSION_ID);
+        const sessionBefore = await repository.loadSession(SESSION_ID);
+        inspectDatabase(databasePath, (database) => database.exec(triggerSql));
+
+        const error = await expectRejected(
+          append(repository),
+          "PERSISTENCE_FAILED",
+        );
+        expect(visibleErrorText(error)).not.toContain(SENTINEL);
+        expect(businessSnapshot(databasePath)).toEqual(rawBefore);
+        expect(await repository.loadTimeline(SESSION_ID)).toEqual(
+          timelineBefore,
+        );
+        expect(await repository.loadSession(SESSION_ID)).toEqual(
+          sessionBefore,
+        );
+      });
+    },
+  );
+
   it("returns fixed PERSISTENCE_FAILED for a corrupted stored timeline row", async () => {
     await withFileRepository(async (repository, databasePath) => {
       await createRunningSession(repository);
@@ -1354,6 +1650,24 @@ describe("session event persistence", () => {
         "PERSISTENCE_FAILED",
       );
       expect(visibleErrorText(error)).not.toContain(SENTINEL);
+    });
+  });
+
+  it("rejects a stored extended-year session whose updatedAt is numerically before createdAt", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await repository.createSession(
+        validSession({ createdAt: "+010000-01-01T00:00:00.000Z" }),
+      );
+      inspectDatabase(databasePath, (database) => {
+        database
+          .prepare("UPDATE sessions SET updated_at = ? WHERE id = ?")
+          .run("9999-12-31T23:59:59.999Z", SESSION_ID);
+      });
+
+      await expectRejected(
+        repository.loadSession(SESSION_ID),
+        "PERSISTENCE_FAILED",
+      );
     });
   });
 });
