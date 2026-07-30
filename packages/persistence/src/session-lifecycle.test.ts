@@ -997,6 +997,279 @@ describe("session lifecycle persistence", () => {
     });
   });
 
+  it("rejects a pending approval whose origin is rebound to a later legal action", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository, "session-causal-rebound");
+      await appendPendingApproval(repository, {
+        sessionId: "session-causal-rebound",
+        round: 1,
+        actionId: "action-causal-original",
+        approvalId: "approval-causal-rebound",
+        startSecond: 1,
+      });
+      await repository.append(
+        stateEvent("session-causal-rebound", 1, at(5), "running"),
+      );
+      await repository.append(
+        actionEvent(
+          "session-causal-rebound",
+          2,
+          at(6),
+          "action-causal-replacement",
+        ),
+      );
+      await repository.append(
+        policyEvent("session-causal-rebound", 2, at(7), "ask"),
+      );
+      inspectDatabase(databasePath, (database) => {
+        database.pragma("foreign_keys = ON");
+        expect(
+          database
+            .prepare(
+              "UPDATE approvals SET action_id = ? WHERE id = ?",
+            )
+            .run(
+              "action-causal-replacement",
+              "approval-causal-rebound",
+            ).changes,
+        ).toBe(1);
+        expect(
+          database
+            .prepare(`
+              UPDATE timeline_events
+              SET round = ?, approval_action_id = ?
+              WHERE approval_id = ? AND approval_status = 'pending'
+            `)
+            .run(
+              2,
+              "action-causal-replacement",
+              "approval-causal-rebound",
+            ).changes,
+        ).toBe(1);
+      });
+      const before = encodedBusinessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.recoverInterruptedSessions(Date.parse(at(20))),
+        "PERSISTENCE_FAILED",
+      );
+
+      expect(encodedBusinessSnapshot(databasePath)).toBe(before);
+    });
+  });
+
+  it("rejects a pending approval rebound across a later-round action", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository, "session-earlier-rebound");
+      await repository.append(
+        actionEvent(
+          "session-earlier-rebound",
+          1,
+          at(1),
+          "action-earlier",
+        ),
+      );
+      await repository.append(
+        policyEvent("session-earlier-rebound", 1, at(2), "ask"),
+      );
+      await repository.append(
+        stateEvent(
+          "session-earlier-rebound",
+          1,
+          at(3),
+          "awaiting_approval",
+        ),
+      );
+      await repository.append(
+        stateEvent("session-earlier-rebound", 1, at(4), "running"),
+      );
+      await appendPendingApproval(repository, {
+        sessionId: "session-earlier-rebound",
+        round: 2,
+        actionId: "action-later",
+        approvalId: "approval-earlier-rebound",
+        startSecond: 5,
+      });
+      inspectDatabase(databasePath, (database) => {
+        database.pragma("foreign_keys = ON");
+        expect(
+          database
+            .prepare(
+              "UPDATE approvals SET action_id = ? WHERE id = ?",
+            )
+            .run("action-earlier", "approval-earlier-rebound").changes,
+        ).toBe(1);
+        expect(
+          database
+            .prepare(`
+              UPDATE timeline_events
+              SET round = ?, approval_action_id = ?
+              WHERE approval_id = ? AND approval_status = 'pending'
+            `)
+            .run(1, "action-earlier", "approval-earlier-rebound").changes,
+        ).toBe(1);
+      });
+      const before = encodedBusinessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.recoverInterruptedSessions(Date.parse(at(20))),
+        "PERSISTENCE_FAILED",
+      );
+
+      expect(encodedBusinessSnapshot(databasePath)).toBe(before);
+    });
+  });
+
+  it("rejects a pending approval whose origin timestamp predates its action", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository, "session-causal-time");
+      await appendPendingApproval(repository, {
+        sessionId: "session-causal-time",
+        round: 1,
+        actionId: "action-causal-time",
+        approvalId: "approval-causal-time",
+        startSecond: 1,
+      });
+      inspectDatabase(databasePath, (database) => {
+        expect(
+          database
+            .prepare(`
+              UPDATE timeline_events
+              SET occurred_at = ?
+              WHERE approval_id = ? AND approval_status = 'pending'
+            `)
+            .run(at(0), "approval-causal-time").changes,
+        ).toBe(1);
+      });
+      const before = encodedBusinessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.recoverInterruptedSessions(Date.parse(at(20))),
+        "PERSISTENCE_FAILED",
+      );
+
+      expect(encodedBusinessSnapshot(databasePath)).toBe(before);
+    });
+  });
+
+  it("rejects a pending approval with duplicate ask policy origins", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository, "session-policy-duplicate");
+      await appendPendingApproval(repository, {
+        sessionId: "session-policy-duplicate",
+        round: 1,
+        actionId: "action-policy-duplicate",
+        approvalId: "approval-policy-duplicate",
+        startSecond: 1,
+      });
+      inspectDatabase(databasePath, (database) => {
+        expect(
+          database
+            .prepare(`
+              INSERT INTO timeline_events (
+                session_id,
+                round,
+                kind,
+                summary,
+                occurred_at,
+                policy_decision
+              ) VALUES (?, ?, 'policy', ?, ?, 'ask')
+            `)
+            .run(
+              "session-policy-duplicate",
+              1,
+              "duplicate ask",
+              at(5),
+            ).changes,
+        ).toBe(1);
+      });
+      const before = encodedBusinessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.recoverInterruptedSessions(Date.parse(at(20))),
+        "PERSISTENCE_FAILED",
+      );
+
+      expect(encodedBusinessSnapshot(databasePath)).toBe(before);
+    });
+  });
+
+  it("rejects a pending approval whose action record and action timeline disagree", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository, "session-action-disagrees");
+      await appendPendingApproval(repository, {
+        sessionId: "session-action-disagrees",
+        round: 1,
+        actionId: "action-disagrees",
+        approvalId: "approval-action-disagrees",
+        startSecond: 1,
+      });
+      inspectDatabase(databasePath, (database) => {
+        expect(
+          database
+            .prepare(`
+              UPDATE timeline_events
+              SET summary = ?
+              WHERE action_id = ? AND kind = 'action'
+            `)
+            .run("tampered action", "action-disagrees").changes,
+        ).toBe(1);
+      });
+      const before = encodedBusinessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.recoverInterruptedSessions(Date.parse(at(20))),
+        "PERSISTENCE_FAILED",
+      );
+
+      expect(encodedBusinessSnapshot(databasePath)).toBe(before);
+    });
+  });
+
+  it("rejects a pending approval with an ambiguous action timeline", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository, "session-action-ambiguous");
+      await appendPendingApproval(repository, {
+        sessionId: "session-action-ambiguous",
+        round: 1,
+        actionId: "action-ambiguous",
+        approvalId: "approval-action-ambiguous",
+        startSecond: 1,
+      });
+      inspectDatabase(databasePath, (database) => {
+        expect(
+          database
+            .prepare(`
+              INSERT INTO timeline_events (
+                session_id,
+                round,
+                kind,
+                summary,
+                occurred_at,
+                action_id,
+                action_kind
+              ) VALUES (?, ?, 'action', ?, ?, ?, 'propose_patch')
+            `)
+            .run(
+              "session-action-ambiguous",
+              1,
+              "propose_patch",
+              at(5),
+              "action-ambiguous",
+            ).changes,
+        ).toBe(1);
+      });
+      const before = encodedBusinessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.recoverInterruptedSessions(Date.parse(at(20))),
+        "PERSISTENCE_FAILED",
+      );
+
+      expect(encodedBusinessSnapshot(databasePath)).toBe(before);
+    });
+  });
+
   it("leaves terminal sessions with pending approvals and memory byte-for-byte unchanged", async () => {
     await withFileRepository(async (repository, databasePath) => {
       await createRunningSession(repository, "terminal-pending");

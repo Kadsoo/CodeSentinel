@@ -1646,37 +1646,52 @@ export function createSessionRepository(databasePath: string): SessionRepository
     `);
     const selectRecoveryActionById = database.prepare(`
       SELECT
-        action_records.action_id,
-        action_records.session_id,
-        action_records.round,
-        action_records.action_kind,
-        action_records.input_summary,
-        action_records.policy_decision,
-        action_records.result_summary,
-        timeline_events.session_id AS event_session_id,
-        timeline_events.round AS event_round,
-        timeline_events.kind AS event_kind,
-        timeline_events.action_id AS event_action_id,
-        timeline_events.action_kind AS event_action_kind
-      FROM action_records
-      INNER JOIN timeline_events
-        ON timeline_events.event_id = action_records.event_id
-      WHERE action_records.action_id = ?
-    `);
-    const selectRecoveryApprovalOrigins = database.prepare(`
-      SELECT
+        action_id,
+        event_id,
         session_id,
         round,
-        kind,
-        approval_id,
-        approval_action_id,
-        patch_hash,
-        base_hash,
-        approval_status,
-        approval_created_at,
-        approval_expires_at
+        action_kind,
+        input_summary,
+        policy_decision,
+        result_summary
+      FROM action_records
+      WHERE action_id = ?
+    `);
+    const selectRecoveryActionOriginIds = database.prepare(`
+      SELECT event_id
+      FROM timeline_events
+      WHERE
+        kind = 'action'
+        AND (
+          (session_id = ? AND round = ?)
+          OR action_id = ?
+        )
+      ORDER BY event_id
+    `);
+    const selectRecoveryHigherRoundActions = database.prepare(`
+      SELECT
+        action_id,
+        event_id,
+        session_id,
+        round,
+        action_kind,
+        input_summary,
+        policy_decision,
+        result_summary
+      FROM action_records
+      WHERE session_id = ? AND round > ?
+      ORDER BY round, event_id
+    `);
+    const selectRecoveryApprovalOriginIds = database.prepare(`
+      SELECT event_id
       FROM timeline_events
       WHERE approval_id = ?
+      ORDER BY event_id
+    `);
+    const selectRecoveryPolicyEventIds = database.prepare(`
+      SELECT event_id
+      FROM timeline_events
+      WHERE session_id = ? AND round = ? AND kind = 'policy'
       ORDER BY event_id
     `);
     const selectActionForRound = database.prepare(`
@@ -2081,43 +2096,133 @@ export function createSessionRepository(databasePath: string): SessionRepository
       }
     }
 
+    function recoveryActionBinding(
+      session: PersistedSession,
+      value: unknown,
+    ): Readonly<{
+      action: ActionRecord;
+      round: number;
+      eventId: number;
+      event: Extract<HarnessEvent, { kind: "action" }>;
+    }> {
+      try {
+        if (typeof value !== "object" || value === null) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const stored = value as Readonly<Record<string, unknown>>;
+        const round = stored.round;
+        const eventId = stored.event_id;
+        if (
+          typeof round !== "number" ||
+          !Number.isInteger(round) ||
+          round < 1 ||
+          round > session.round ||
+          typeof eventId !== "number" ||
+          !Number.isSafeInteger(eventId) ||
+          eventId < 1
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const action = mapActionRecordRow(
+          value,
+          session.id,
+          round,
+        );
+        const originRows = selectRecoveryActionOriginIds.all(
+          session.id,
+          round,
+          action.actionId,
+        );
+        if (originRows.length !== 1) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const originRow = originRows[0];
+        if (typeof originRow !== "object" || originRow === null) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const originEventId = (
+          originRow as Readonly<Record<string, unknown>>
+        ).event_id;
+        if (originEventId !== eventId) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const event = mapTimelineRow(
+          selectTimelineByEventId.get(eventId),
+          session.id,
+        );
+        if (
+          event.kind !== "action" ||
+          event.round !== round ||
+          event.summary !== action.inputSummary ||
+          event.details.actionId !== action.actionId ||
+          event.details.actionKind !== action.actionKind
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        return Object.freeze({ action, round, eventId, event });
+      } catch {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+    }
+
     function assertRecoveryApprovalBinding(
       session: PersistedSession,
       approval: ApprovalRecord,
     ): void {
       try {
         const row = selectRecoveryActionById.get(approval.actionId);
-        if (typeof row !== "object" || row === null) {
-          throw persistenceError("PERSISTENCE_FAILED");
-        }
-        const stored = row as Readonly<Record<string, unknown>>;
-        const actionRound = stored.round;
-        if (
-          typeof actionRound !== "number" ||
-          !Number.isInteger(actionRound) ||
-          actionRound < 1 ||
-          actionRound > session.round
-        ) {
-          throw persistenceError("PERSISTENCE_FAILED");
-        }
-        const action = mapActionRecordRow(
+        const {
+          action,
+          round: actionRound,
+          eventId: actionEventId,
+          event: actionEvent,
+        } = recoveryActionBinding(
+          session,
           row,
-          session.id,
-          actionRound,
         );
         if (
           action.actionId !== approval.actionId ||
           action.actionKind !== "propose_patch" ||
           action.policyDecision !== "ask" ||
-          stored.event_session_id !== session.id ||
-          stored.event_round !== actionRound ||
-          stored.event_kind !== "action" ||
-          stored.event_action_id !== approval.actionId ||
-          stored.event_action_kind !== "propose_patch"
+          action.resultSummary !== null
         ) {
           throw persistenceError("PERSISTENCE_FAILED");
         }
-        const origins = selectRecoveryApprovalOrigins.all(
+
+        const policyRows = selectRecoveryPolicyEventIds.all(
+          session.id,
+          actionRound,
+        );
+        if (policyRows.length !== 1) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const policyRow = policyRows[0];
+        if (typeof policyRow !== "object" || policyRow === null) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const policyEventId = (
+          policyRow as Readonly<Record<string, unknown>>
+        ).event_id;
+        if (
+          typeof policyEventId !== "number" ||
+          !Number.isSafeInteger(policyEventId) ||
+          policyEventId < 1
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const policyEvent = mapTimelineRow(
+          selectTimelineByEventId.get(policyEventId),
+          session.id,
+        );
+        if (
+          policyEvent.kind !== "policy" ||
+          policyEvent.round !== actionRound ||
+          policyEvent.details.decision !== "ask"
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+
+        const origins = selectRecoveryApprovalOriginIds.all(
           approval.approvalId,
         );
         if (origins.length !== 1) {
@@ -2127,22 +2232,73 @@ export function createSessionRepository(databasePath: string): SessionRepository
         if (typeof origin !== "object" || origin === null) {
           throw persistenceError("PERSISTENCE_FAILED");
         }
-        const storedOrigin = origin as Readonly<
-          Record<string, unknown>
-        >;
+        const originEventId = (
+          origin as Readonly<Record<string, unknown>>
+        ).event_id;
         if (
-          storedOrigin.session_id !== session.id ||
-          storedOrigin.round !== actionRound ||
-          storedOrigin.kind !== "approval" ||
-          storedOrigin.approval_id !== approval.approvalId ||
-          storedOrigin.approval_action_id !== approval.actionId ||
-          storedOrigin.patch_hash !== approval.patchHash ||
-          storedOrigin.base_hash !== approval.baseHash ||
-          storedOrigin.approval_status !== "pending" ||
-          storedOrigin.approval_created_at !== approval.createdAt ||
-          storedOrigin.approval_expires_at !== approval.expiresAt
+          typeof originEventId !== "number" ||
+          !Number.isSafeInteger(originEventId) ||
+          originEventId < 1
         ) {
           throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const originEvent = mapTimelineRow(
+          selectTimelineByEventId.get(originEventId),
+          session.id,
+        );
+        if (
+          originEvent.kind !== "approval" ||
+          originEvent.round !== actionRound ||
+          originEvent.details.approvalId !== approval.approvalId ||
+          originEvent.details.actionId !== approval.actionId ||
+          originEvent.details.patchHash !== approval.patchHash ||
+          originEvent.details.baseHash !== approval.baseHash ||
+          originEvent.details.status !== "pending" ||
+          originEvent.details.createdAt !== approval.createdAt ||
+          originEvent.details.expiresAt !== approval.expiresAt ||
+          actionEventId >= policyEventId ||
+          policyEventId >= originEventId
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const actionEpoch = canonicalEpoch(actionEvent.occurredAt);
+        const policyEpoch = canonicalEpoch(policyEvent.occurredAt);
+        const originEpoch = canonicalEpoch(originEvent.occurredAt);
+        if (
+          actionEpoch === undefined ||
+          policyEpoch === undefined ||
+          originEpoch === undefined ||
+          actionEpoch > policyEpoch ||
+          policyEpoch > originEpoch
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+
+        const higherActionRows = selectRecoveryHigherRoundActions.all(
+          session.id,
+          actionRound,
+        );
+        if (
+          higherActionRows.length !== session.round - actionRound
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        for (const [index, higherActionRow] of higherActionRows.entries()) {
+          const higherAction = recoveryActionBinding(
+            session,
+            higherActionRow,
+          );
+          const higherActionEpoch = canonicalEpoch(
+            higherAction.event.occurredAt,
+          );
+          if (
+            higherAction.round !== actionRound + index + 1 ||
+            originEventId >= higherAction.eventId ||
+            higherActionEpoch === undefined ||
+            originEpoch > higherActionEpoch
+          ) {
+            throw persistenceError("PERSISTENCE_FAILED");
+          }
         }
       } catch {
         throw persistenceError("PERSISTENCE_FAILED");
