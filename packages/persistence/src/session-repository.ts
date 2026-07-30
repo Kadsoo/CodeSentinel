@@ -16,6 +16,8 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const KNOWN_KEY_FRAGMENT =
   /(?:sk-|sk_|pk_|rk_|ghp_)[A-Za-z0-9_-]{12,}/iu;
 
+type CreateSessionTransactionResult = "inserted" | "duplicate" | "failed";
+
 function assertIdentifier(value: unknown): asserts value is string {
   if (
     typeof value !== "string" ||
@@ -168,6 +170,11 @@ export function createSessionRepository(databasePath: string): SessionRepository
       )
       ON CONFLICT(id) DO NOTHING
     `);
+    const selectSessionId = database.prepare(`
+      SELECT id
+      FROM sessions
+      WHERE id = ?
+    `);
     const selectSession = database.prepare(`
       SELECT
         id,
@@ -182,6 +189,27 @@ export function createSessionRepository(databasePath: string): SessionRepository
       FROM sessions
       WHERE id = ?
     `);
+    const createSessionTransaction = database.transaction(
+      (
+        input: CreatePersistedSessionInput,
+      ): CreateSessionTransactionResult => {
+        if (selectSessionId.get(input.id) !== undefined) {
+          return "duplicate";
+        }
+        const changes = insertSession.run({
+          id: input.id,
+          taskKind: input.taskKind,
+          state: input.state,
+          round: input.round,
+          workspaceId: input.workspaceId,
+          providerId: input.providerId,
+          verificationCommandId: input.verificationCommandId,
+          createdAt: input.createdAt,
+          updatedAt: input.createdAt,
+        }).changes;
+        return changes === 1 ? "inserted" : "failed";
+      },
+    );
     let closed = false;
 
     function assertOpen(): void {
@@ -195,26 +223,16 @@ export function createSessionRepository(databasePath: string): SessionRepository
     ): Promise<void> {
       assertOpen();
       const validated = validatedCreateSessionInput(input);
-      let changes: number;
+      let result: CreateSessionTransactionResult;
       try {
-        changes = insertSession.run({
-          id: validated.id,
-          taskKind: validated.taskKind,
-          state: validated.state,
-          round: validated.round,
-          workspaceId: validated.workspaceId,
-          providerId: validated.providerId,
-          verificationCommandId: validated.verificationCommandId,
-          createdAt: validated.createdAt,
-          updatedAt: validated.createdAt,
-        }).changes;
+        result = createSessionTransaction.immediate(validated);
       } catch {
         throw persistenceError("PERSISTENCE_FAILED");
       }
-      if (changes === 0) {
+      if (result === "duplicate") {
         throw persistenceError("DUPLICATE_RECORD");
       }
-      if (changes !== 1) {
+      if (result !== "inserted") {
         throw persistenceError("PERSISTENCE_FAILED");
       }
     }

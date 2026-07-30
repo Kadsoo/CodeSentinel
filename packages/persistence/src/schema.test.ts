@@ -524,7 +524,7 @@ describe("session repository initialization", () => {
     }
   });
 
-  it("returns DUPLICATE_RECORD when an insert reports zero changes without a native message", async () => {
+  it("returns PERSISTENCE_FAILED when a new-ID insert reports zero changes", async () => {
     await withDatabasePath(async (databasePath) => {
       const repository = createSessionRepository(databasePath);
       try {
@@ -549,7 +549,7 @@ describe("session repository initialization", () => {
             }),
           ),
         ).rejects.toMatchObject({
-          code: "DUPLICATE_RECORD",
+          code: "PERSISTENCE_FAILED",
         });
       } finally {
         repository.close();
