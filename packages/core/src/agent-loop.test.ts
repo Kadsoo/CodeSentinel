@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EventSink, HarnessEvent } from "../../contracts/src/index.js";
-import type { BoundPolicy } from "../../policy/src/index.js";
+import { createPolicy, type BoundPolicy } from "../../policy/src/index.js";
 import { ScriptedMockProvider, type Provider } from "../../providers/src/index.js";
 import { MAX_PATCH_BYTES } from "../../tools/src/index.js";
 import { createAgentSessionController } from "./agent-loop.js";
@@ -15,6 +15,7 @@ import {
   fixedNow,
   passingVerification,
   sequenceIds,
+  testCommand,
 } from "./test-support.js";
 
 function createController(
@@ -166,6 +167,57 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(result.finalSummary).toBe("ROUND_LIMIT_REACHED");
     expect(provider.requests).toHaveLength(3);
     expect(fake.runVerification).toHaveBeenCalledTimes(4);
+  });
+
+  it("binds provider verification to the session-selected command before dispatch", async () => {
+    const unrelatedVerificationSecret = "unrelated-verification-secret";
+    const policy = createPolicy({
+      workspaceRoot: "C:/workspace",
+      config: {
+        allowedPaths: ["src/**"],
+        verificationCommands: [
+          testCommand,
+          { ...testCommand, id: "unrelated-check", args: ["run", "verify"] },
+        ],
+      },
+    });
+    const provider = new ScriptedMockProvider([
+      { kind: "run_verification", commandId: "unrelated-check" },
+    ]);
+    const fake = fakeTools({
+      runVerification: async (action) =>
+        action.commandId === "test"
+          ? failedVerification
+          : {
+              ...passingVerification,
+              commandId: "unrelated-check",
+              summary: unrelatedVerificationSecret,
+            },
+    });
+    const controller = createController(provider, fake.tools, { policy });
+
+    expect(policy.evaluate({ kind: "run_verification", commandId: "unrelated-check" })).toEqual({
+      decision: "allow",
+      reason: "ALLOWED",
+    });
+
+    const result = await controller.runAgentSession({ session: createdRepairSession() });
+
+    expect(result.session.state).toBe("blocked");
+    expect(result.finalSummary).toBe("POLICY_DENIED");
+    expect(fake.runVerification).toHaveBeenCalledExactlyOnceWith({
+      kind: "run_verification",
+      commandId: "test",
+    });
+    expect(result.events.filter((event) => event.kind === "verification")).toHaveLength(1);
+    expect(result.events.map((event) => [event.kind, event.summary])).toEqual([
+      ["verification", failedVerification.summary],
+      ["state", "RUNNING"],
+      ["action", "run_verification"],
+      ["policy", "ALLOWED"],
+      ["state", "POLICY_DENIED"],
+    ]);
+    expect(JSON.stringify(result)).not.toContain(unrelatedVerificationSecret);
   });
 
   it("fails closed on an inconsistent timedOut loop verification without another provider request", async () => {

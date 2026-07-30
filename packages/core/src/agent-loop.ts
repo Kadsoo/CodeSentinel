@@ -339,13 +339,6 @@ export function createAgentSessionController(
       if (action.kind === "finish") {
         return finishFromModel(record, action);
       }
-      if (
-        record.session.taskKind === "feature_implementation" &&
-        action.kind === "run_verification"
-      ) {
-        return terminal(record, "blocked", "FEATURE_STAGE_INVALID");
-      }
-
       const dispatched = await dispatchAction(record, action);
       if (dispatched !== undefined) {
         return dispatched;
@@ -423,6 +416,12 @@ export function createAgentSessionController(
     kind: "finish" | "propose_patch" | "apply_approved_patch";
   }>): Promise<AgentSessionResult | undefined> {
     if (action.kind === "run_verification") {
+      if (action.commandId !== record.session.verificationCommandId) {
+        return terminal(record, "blocked", "POLICY_DENIED");
+      }
+      if (record.session.taskKind === "feature_implementation") {
+        return terminal(record, "blocked", "FEATURE_STAGE_INVALID");
+      }
       let value: unknown;
       try {
         value = await dependencies.tools.runVerification(action);

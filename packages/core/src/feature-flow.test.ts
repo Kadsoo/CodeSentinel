@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { BoundPolicy } from "../../policy/src/index.js";
+import { createPolicy, type BoundPolicy } from "../../policy/src/index.js";
 import { ScriptedMockProvider } from "../../providers/src/index.js";
 import type { VerificationResult } from "../../tools/src/index.js";
 import { createAgentSessionController } from "./agent-loop.js";
@@ -12,6 +12,7 @@ import {
   fixedNow,
   passingVerification,
   sequenceIds,
+  testCommand,
 } from "./test-support.js";
 
 const baseHash = "a".repeat(64);
@@ -90,6 +91,100 @@ describe("AgentSessionController feature test-first flow", () => {
     expect(result.finalSummary).toBe("INVALID_SESSION_INPUT");
     expect(provider.requests).toEqual([]);
     expect(fake.runVerification).not.toHaveBeenCalled();
+  });
+
+  it("binds provider verification to the feature session command before stage validation", async () => {
+    const unrelatedVerificationSecret = "feature-unrelated-verification-secret";
+    const policy = createPolicy({
+      workspaceRoot: "C:/workspace",
+      config: {
+        allowedPaths: ["src/**"],
+        verificationCommands: [
+          testCommand,
+          { ...testCommand, id: "unrelated-check", args: ["run", "verify"] },
+        ],
+      },
+    });
+    const provider = new ScriptedMockProvider([
+      { kind: "run_verification", commandId: "unrelated-check" },
+    ]);
+    const fake = fakeTools({
+      runVerification: async (action) =>
+        action.commandId === "unrelated-check"
+          ? {
+              ...passingVerification,
+              commandId: "unrelated-check",
+              summary: unrelatedVerificationSecret,
+            }
+          : failedVerification,
+    });
+    const controller = createAgentSessionController({
+      provider,
+      policy,
+      tools: fake.tools,
+      eventSink: new InMemoryEventSink(),
+      now: fixedNow,
+      createId: sequenceIds(),
+    });
+
+    expect(policy.evaluate({ kind: "run_verification", commandId: "unrelated-check" })).toEqual({
+      decision: "allow",
+      reason: "ALLOWED",
+    });
+
+    const result = await controller.runAgentSession({ session: createdFeatureSession() });
+
+    expect(fake.runVerification).not.toHaveBeenCalled();
+    expect(result.events).not.toContainEqual(expect.objectContaining({ kind: "verification" }));
+    expect(result.events.map((event) => [event.kind, event.summary])).toEqual([
+      ["state", "RUNNING"],
+      ["action", "run_verification"],
+      ["policy", "ALLOWED"],
+      ["state", "POLICY_DENIED"],
+    ]);
+    expect(JSON.stringify(result)).not.toContain(unrelatedVerificationSecret);
+    expect(result.session.state).toBe("blocked");
+    expect(result.finalSummary).toBe("POLICY_DENIED");
+  });
+
+  it("keeps the feature stage gate after matching the selected verification command", async () => {
+    const selectedVerificationSecret = "feature-selected-verification-secret";
+    const policy = createPolicy({
+      workspaceRoot: "C:/workspace",
+      config: {
+        allowedPaths: ["src/**"],
+        verificationCommands: [testCommand],
+      },
+    });
+    const provider = new ScriptedMockProvider([{ kind: "run_verification", commandId: "test" }]);
+    const fake = fakeTools({
+      runVerification: async () => ({
+        ...passingVerification,
+        summary: selectedVerificationSecret,
+      }),
+    });
+    const controller = createAgentSessionController({
+      provider,
+      policy,
+      tools: fake.tools,
+      eventSink: new InMemoryEventSink(),
+      now: fixedNow,
+      createId: sequenceIds(),
+    });
+
+    expect(policy.evaluate({ kind: "run_verification", commandId: "test" })).toEqual({
+      decision: "allow",
+      reason: "ALLOWED",
+    });
+
+    const result = await controller.runAgentSession({ session: createdFeatureSession() });
+
+    expect(result.session.round).toBe(1);
+    expect(fake.runVerification).not.toHaveBeenCalled();
+    expect(result.events).not.toContainEqual(expect.objectContaining({ kind: "verification" }));
+    expect(JSON.stringify(result)).not.toContain(selectedVerificationSecret);
+    expect(result.session.state).toBe("blocked");
+    expect(result.finalSummary).toBe("FEATURE_STAGE_INVALID");
   });
 
   it("requires test proposal, RED, implementation proposal, and GREEN in order", async () => {
