@@ -18,6 +18,32 @@ import type { ToolDispatcher } from "./tool-dispatcher.js";
 
 const originalPatch = "@@ -1 +1 @@\n-export const add = () => 0;\n+export const add = () => 2;";
 
+function expectApprovalResolutionDetails(
+  eventSink: InMemoryEventSink,
+  status: "approved" | "rejected" | "expired",
+): void {
+  const pendingEvent = eventSink.events.find(
+    (event) => event.kind === "approval" && event.details.status === "pending",
+  );
+  const resolutionEvent = eventSink.events.find(
+    (event) => event.kind === "approval" && event.details.status === status,
+  );
+  expect(pendingEvent?.kind).toBe("approval");
+  expect(resolutionEvent?.kind).toBe("approval");
+  if (pendingEvent?.kind !== "approval" || resolutionEvent?.kind !== "approval") {
+    return;
+  }
+  expect(resolutionEvent.details).toEqual({
+    approvalId: pendingEvent.details.approvalId,
+    actionId: pendingEvent.details.actionId,
+    patchHash: pendingEvent.details.patchHash,
+    baseHash: pendingEvent.details.baseHash,
+    createdAt: pendingEvent.details.createdAt,
+    expiresAt: pendingEvent.details.expiresAt,
+    status,
+  });
+}
+
 function createControllerThatProposesPatch(
   overrides: Parameters<typeof fakeTools>[0] = {},
 ) {
@@ -137,20 +163,21 @@ describe("AgentSessionController trusted approval resume", () => {
       "state",
     ]);
     const actionEvent = eventSink.events.find((event) => event.kind === "action");
-    const pendingApprovalEvent = eventSink.events.find(
+    const initialApprovalEvent = eventSink.events.find(
       (event) => event.kind === "approval" && event.details.status === "pending",
     );
     const actionId = actionEvent?.kind === "action" ? actionEvent.details.actionId : undefined;
-    const approvedActionId =
-      pendingApprovalEvent?.kind === "approval"
-        ? pendingApprovalEvent.details.actionId
+    const approvalActionId =
+      initialApprovalEvent?.kind === "approval"
+        ? initialApprovalEvent.details.actionId
         : undefined;
-    expect(approvedActionId).toBe(actionId);
+    expect(approvalActionId).toBe(actionId);
+    expectApprovalResolutionDetails(eventSink, "approved");
   });
 
   it("stops a rejection and consumes the approval so it cannot be replayed", async () => {
     const applyApprovedPatch = vi.fn<ToolDispatcher["applyApprovedPatch"]>();
-    const { controller } = createControllerThatProposesPatch({ applyApprovedPatch });
+    const { controller, eventSink } = createControllerThatProposesPatch({ applyApprovedPatch });
     const pending = await controller.runAgentSession({ session: createdRepairSession() });
     const input = {
       sessionId: pending.session.id,
@@ -162,6 +189,7 @@ describe("AgentSessionController trusted approval resume", () => {
 
     expect(result.session.state).toBe("stopped");
     expect(result.finalSummary).toBe("APPROVAL_REJECTED");
+    expectApprovalResolutionDetails(eventSink, "rejected");
     await expect(controller.resolvePendingPatch({ ...input, decision: "approve" })).rejects.toMatchObject({
       code: "APPROVAL_ALREADY_RESOLVED",
     });
@@ -170,7 +198,7 @@ describe("AgentSessionController trusted approval resume", () => {
 
   it("stops without writing when the stored base hash has changed", async () => {
     const applyApprovedPatch = vi.fn<ToolDispatcher["applyApprovedPatch"]>();
-    const { controller } = createControllerThatProposesPatch({
+    const { controller, eventSink } = createControllerThatProposesPatch({
       applyApprovedPatch,
       currentBaseHash: "b".repeat(64),
     });
@@ -184,6 +212,7 @@ describe("AgentSessionController trusted approval resume", () => {
 
     expect(result.session.state).toBe("stopped");
     expect(result.finalSummary).toBe("APPROVAL_BASE_CHANGED");
+    expectApprovalResolutionDetails(eventSink, "expired");
     expect(applyApprovedPatch).not.toHaveBeenCalled();
   });
 
@@ -341,6 +370,7 @@ describe("AgentSessionController trusted approval resume", () => {
     expect(result.finalSummary).toBe("APPROVAL_EXPIRED");
     expect(applyApprovedPatch).not.toHaveBeenCalled();
     expect(eventSink.events.map((event) => event.summary)).toContain("APPROVAL_EXPIRED");
+    expectApprovalResolutionDetails(eventSink, "expired");
   });
 
   it.each([

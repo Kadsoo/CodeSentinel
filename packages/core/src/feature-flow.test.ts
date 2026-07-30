@@ -300,6 +300,18 @@ describe("AgentSessionController feature test-first flow", () => {
     ["negative duration", { ...failedVerification, durationMs: -1 }],
     ["non-safe duration", { ...failedVerification, durationMs: Number.MAX_SAFE_INTEGER + 1 }],
     ["status/timedOut mismatch", { ...failedVerification, status: "timed_out" as const }],
+    [
+      "timed_out with an exit code",
+      { ...failedVerification, exitCode: 1, status: "timed_out" as const, timedOut: true },
+    ],
+    [
+      "spawn_failed with an exit code",
+      { ...failedVerification, exitCode: 1, status: "spawn_failed" as const, timedOut: false },
+    ],
+    [
+      "output_limit with an exit code",
+      { ...failedVerification, exitCode: 1, status: "output_limit" as const, timedOut: false },
+    ],
   ] as const)(
     "fails closed after an approved patch with %s without auditing the malformed verification",
     async (_name, verification) => {

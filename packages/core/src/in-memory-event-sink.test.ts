@@ -54,4 +54,32 @@ describe("InMemoryEventSink", () => {
     expect(Object.isFrozen(first[0])).toBe(true);
     expect(Object.isFrozen(first[0]?.details)).toBe(true);
   });
+
+  it("drops undeclared runtime event and detail keys", async () => {
+    const sink = new InMemoryEventSink();
+    const event = {
+      sessionId: "session-1",
+      round: 1,
+      kind: "action",
+      summary: "read_file",
+      occurredAt: "2026-07-30T00:00:00.000Z",
+      provider: "must-not-survive",
+      details: {
+        actionId: "action-1",
+        actionKind: "read_file",
+        path: "src/private.ts",
+      },
+    } as unknown as HarnessEvent;
+
+    await sink.append(event);
+
+    expect(sink.events[0]).toEqual({
+      sessionId: "session-1",
+      round: 1,
+      kind: "action",
+      summary: "read_file",
+      occurredAt: "2026-07-30T00:00:00.000Z",
+      details: { actionId: "action-1", actionKind: "read_file" },
+    });
+  });
 });

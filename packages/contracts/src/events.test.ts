@@ -50,4 +50,45 @@ describe("HarnessEvent", () => {
       "list_files" | "read_file" | "search_text" | "apply_approved_patch"
     >();
   });
+
+  it("rejects undeclared detail keys at compile time", () => {
+    const actionDetails: Extract<HarnessEvent, { kind: "action" }>["details"] = {
+      actionId: "action-1",
+      actionKind: "propose_patch",
+      // @ts-expect-error patch content is not an action audit detail
+      patch: "@@ forged",
+    };
+    const policyDetails: Extract<HarnessEvent, { kind: "policy" }>["details"] = {
+      decision: "allow",
+      // @ts-expect-error provider data is not a policy audit detail
+      provider: "provider-1",
+    };
+    const toolDetails: Extract<HarnessEvent, { kind: "tool_result" }>["details"] = {
+      toolKind: "read_file",
+      // @ts-expect-error tool output is not a tool-result audit detail
+      output: "secret output",
+    };
+    const verificationDetails: Extract<HarnessEvent, { kind: "verification" }>["details"] = {
+      commandId: "test",
+      exitCode: 1,
+      durationMs: 4,
+      status: "completed",
+      timedOut: false,
+      // @ts-expect-error filesystem paths are not verification audit details
+      path: "src/private.ts",
+    };
+    const stateDetails: Extract<HarnessEvent, { kind: "state" }>["details"] = {
+      state: "running",
+      // @ts-expect-error arbitrary fields are not state audit details
+      arbitrary: "extra",
+    };
+
+    expect([
+      actionDetails,
+      policyDetails,
+      toolDetails,
+      verificationDetails,
+      stateDetails,
+    ]).toHaveLength(5);
+  });
 });

@@ -330,7 +330,6 @@ export function createAgentSessionController(
         return terminal(record, "failed", "INVALID_ACTION");
       }
 
-      incrementRound(record);
       const action = parsed.data;
       let actionId: string;
       try {
@@ -341,6 +340,7 @@ export function createAgentSessionController(
       if (!isSafeGeneratedId(actionId)) {
         return terminal(record, "failed", "TOOL_FAILED");
       }
+      incrementRound(record);
       if (
         !(await appendEvent(record, {
           kind: "action",
@@ -658,6 +658,7 @@ function validateStartSession(input: unknown): AgentSession | undefined {
       workspaceId === undefined ||
       providerId === undefined ||
       verificationCommandId === undefined ||
+      !isSafeGeneratedId(verificationCommandId) ||
       taskSummary === undefined ||
       (taskKind !== "test_repair" && taskKind !== "feature_implementation") ||
       state !== "created" ||
@@ -799,6 +800,7 @@ function readVerification(value: unknown, commandId: string): VerificationObserv
       !Number.isSafeInteger(durationMs) ||
       durationMs < 0 ||
       !isConsistentVerificationStatus(status, timedOut) ||
+      (status !== "completed" && exitCode !== null) ||
       typeof summary !== "string"
     ) {
       return undefined;
@@ -1052,12 +1054,67 @@ function snapshot(
 }
 
 function copyEvent(event: HarnessEvent): HarnessEvent {
-  return createEvent(
-    event.sessionId,
-    event.round,
-    event.occurredAt,
-    eventPayload(event),
-  );
+  const base = {
+    sessionId: event.sessionId,
+    round: event.round,
+    summary: event.summary,
+    occurredAt: event.occurredAt,
+  };
+  switch (event.kind) {
+    case "action":
+      return Object.freeze({
+        ...base,
+        kind: "action",
+        details: Object.freeze({
+          actionId: event.details.actionId,
+          actionKind: event.details.actionKind,
+        }),
+      });
+    case "policy":
+      return Object.freeze({
+        ...base,
+        kind: "policy",
+        details: Object.freeze({ decision: event.details.decision }),
+      });
+    case "tool_result":
+      return Object.freeze({
+        ...base,
+        kind: "tool_result",
+        details: Object.freeze({ toolKind: event.details.toolKind }),
+      });
+    case "verification":
+      return Object.freeze({
+        ...base,
+        kind: "verification",
+        details: Object.freeze({
+          commandId: event.details.commandId,
+          exitCode: event.details.exitCode,
+          durationMs: event.details.durationMs,
+          status: event.details.status,
+          timedOut: event.details.timedOut,
+        }),
+      });
+    case "state":
+      return Object.freeze({
+        ...base,
+        kind: "state",
+        details: Object.freeze({ state: event.details.state }),
+      });
+    case "approval":
+      return Object.freeze({
+        ...base,
+        kind: "approval",
+        details: Object.freeze({
+          approvalId: event.details.approvalId,
+          actionId: event.details.actionId,
+          patchHash: event.details.patchHash,
+          baseHash: event.details.baseHash,
+          status: event.details.status,
+          createdAt: event.details.createdAt,
+          expiresAt: event.details.expiresAt,
+        }),
+      });
+  }
 }
 
 function stateEvent(record: SessionRecord, summary: string): HarnessEventPayload {
@@ -1162,64 +1219,6 @@ function createEvent(
           status: payload.details.status,
           createdAt: payload.details.createdAt,
           expiresAt: payload.details.expiresAt,
-        }),
-      });
-  }
-}
-
-function eventPayload(event: HarnessEvent): HarnessEventPayload {
-  switch (event.kind) {
-    case "action":
-      return Object.freeze({
-        kind: "action",
-        summary: event.summary,
-        details: Object.freeze({
-          actionId: event.details.actionId,
-          actionKind: event.details.actionKind,
-        }),
-      });
-    case "policy":
-      return Object.freeze({
-        kind: "policy",
-        summary: event.summary,
-        details: Object.freeze({ decision: event.details.decision }),
-      });
-    case "tool_result":
-      return Object.freeze({
-        kind: "tool_result",
-        summary: event.summary,
-        details: Object.freeze({ toolKind: event.details.toolKind }),
-      });
-    case "verification":
-      return Object.freeze({
-        kind: "verification",
-        summary: event.summary,
-        details: Object.freeze({
-          commandId: event.details.commandId,
-          exitCode: event.details.exitCode,
-          durationMs: event.details.durationMs,
-          status: event.details.status,
-          timedOut: event.details.timedOut,
-        }),
-      });
-    case "state":
-      return Object.freeze({
-        kind: "state",
-        summary: event.summary,
-        details: Object.freeze({ state: event.details.state }),
-      });
-    case "approval":
-      return Object.freeze({
-        kind: "approval",
-        summary: event.summary,
-        details: Object.freeze({
-          approvalId: event.details.approvalId,
-          actionId: event.details.actionId,
-          patchHash: event.details.patchHash,
-          baseHash: event.details.baseHash,
-          status: event.details.status,
-          createdAt: event.details.createdAt,
-          expiresAt: event.details.expiresAt,
         }),
       });
   }

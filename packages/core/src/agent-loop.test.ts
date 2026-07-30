@@ -134,6 +134,18 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     ["negative duration", { ...passingVerification, durationMs: -1 }],
     ["non-safe duration", { ...passingVerification, durationMs: Number.MAX_SAFE_INTEGER + 1 }],
     ["status/timedOut mismatch", { ...passingVerification, timedOut: true }],
+    [
+      "timed_out with an exit code",
+      { ...passingVerification, exitCode: 1, status: "timed_out" as const, timedOut: true },
+    ],
+    [
+      "spawn_failed with an exit code",
+      { ...passingVerification, exitCode: 1, status: "spawn_failed" as const, timedOut: false },
+    ],
+    [
+      "output_limit with an exit code",
+      { ...passingVerification, exitCode: 1, status: "output_limit" as const, timedOut: false },
+    ],
   ] as const)("fails closed on an initial verification with %s without auditing it", async (
     _name,
     verification,
@@ -306,6 +318,12 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(result.finalSummary).toBe("TOOL_FAILED");
     expect(fake.readFile).not.toHaveBeenCalled();
     expect(result.events.some((event) => event.kind === "action")).toBe(false);
+    expect(result.session.round).toBe(0);
+    expect(result.events.at(-1)).toMatchObject({
+      kind: "state",
+      round: 0,
+      details: { state: "failed" },
+    });
     expect(JSON.stringify(result)).not.toContain("sk_live_12345678901234567890");
     expect(JSON.stringify(result)).not.toContain("unsafe/id");
     expect(JSON.stringify(result)).not.toContain("id-secret");
@@ -1020,6 +1038,29 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(provider.requests).toEqual([]);
     expect(fake.runVerification).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["path-like", "test/path"],
+    ["secret-like", "sk_live_12345678901234567890"],
+  ] as const)(
+    "rejects a %s verification command identifier without side effects or disclosure",
+    async (_name, verificationCommandId) => {
+      const provider = new ScriptedMockProvider([]);
+      const fake = fakeTools({ verification: failedVerification });
+      const controller = createController(provider, fake.tools);
+
+      const result = await controller.runAgentSession({
+        session: { ...createdRepairSession(), verificationCommandId },
+      });
+
+      expect(result.session.state).toBe("failed");
+      expect(result.finalSummary).toBe("INVALID_SESSION_INPUT");
+      expect(result.events).toEqual([]);
+      expect(provider.requests).toEqual([]);
+      expect(fake.runVerification).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toContain(verificationCommandId);
+    },
+  );
 
   it("returns detached immutable snapshots and does not retain a caller session object", async () => {
     const sourceSession = { ...createdRepairSession() };
