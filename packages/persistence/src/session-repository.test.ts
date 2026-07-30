@@ -272,6 +272,8 @@ function businessSnapshot(databasePath: string): Readonly<{
   sessions: readonly unknown[];
   timeline: readonly unknown[];
   actions: readonly unknown[];
+  approvals: readonly unknown[];
+  verifications: readonly unknown[];
 }> {
   return inspectDatabase(databasePath, (database) => ({
     sessions: database.prepare("SELECT * FROM sessions ORDER BY id").all(),
@@ -280,6 +282,10 @@ function businessSnapshot(databasePath: string): Readonly<{
       .all(),
     actions: database
       .prepare("SELECT * FROM action_records ORDER BY action_id")
+      .all(),
+    approvals: database.prepare("SELECT * FROM approvals ORDER BY id").all(),
+    verifications: database
+      .prepare("SELECT * FROM verification_runs ORDER BY run_id")
       .all(),
   }));
 }
@@ -295,11 +301,26 @@ async function createRunningSession(
 
 async function createAwaitingApprovalSession(
   repository: SessionRepository,
+  overrides: Partial<CreatePersistedSessionInput> = {},
 ): Promise<void> {
-  await createRunningSession(repository);
+  await createRunningSession(repository, overrides);
   await repository.append(actionEvent(1, at(1), "propose_patch"));
   await repository.append(policyEvent(1, at(2), "ask"));
   await repository.append(stateEvent(1, at(3), "awaiting_approval"));
+}
+
+async function createApprovedAppliedPatchSession(
+  repository: SessionRepository,
+  overrides: Partial<CreatePersistedSessionInput> = {},
+): Promise<void> {
+  await createAwaitingApprovalSession(repository, overrides);
+  await repository.append(approvalEvent(1, at(4)));
+  await repository.append(
+    approvalEvent(1, at(5), { status: "approved" }),
+  );
+  await repository.append(
+    toolEvent(1, at(6), "apply_approved_patch", "patch applied"),
+  );
 }
 
 async function putSessionInState(
@@ -431,7 +452,7 @@ describe("session event persistence", () => {
     });
   });
 
-  it("maps every event variant without prematurely normalizing approvals or verifications", async () => {
+  it("maps every event variant and persists normalized approvals and verifications", async () => {
     await withFileRepository(async (repository, databasePath) => {
       await createAwaitingApprovalSession(repository);
       await repository.append(approvalEvent(1, at(4)));
@@ -468,19 +489,49 @@ describe("session event persistence", () => {
         expect(Object.isFrozen(event.details)).toBe(true);
       }
 
-      const normalizedCounts = inspectDatabase(databasePath, (database) => ({
-        approvals: (
-          database.prepare("SELECT count(*) AS count FROM approvals").get() as {
-            count: number;
-          }
-        ).count,
-        verifications: (
-          database
-            .prepare("SELECT count(*) AS count FROM verification_runs")
-            .get() as { count: number }
-        ).count,
+      const normalized = inspectDatabase(databasePath, (database) => ({
+        approval: database.prepare("SELECT * FROM approvals").get(),
+        verification: database
+          .prepare(`
+            SELECT
+              session_id,
+              round,
+              command_id,
+              exit_code,
+              duration_ms,
+              status,
+              timed_out,
+              summary
+            FROM verification_runs
+          `)
+          .get(),
+        action: database
+          .prepare("SELECT result_summary FROM action_records WHERE action_id = ?")
+          .get(ACTION_ID),
       }));
-      expect(normalizedCounts).toEqual({ approvals: 0, verifications: 0 });
+      expect(normalized).toEqual({
+        approval: {
+          id: "approval-1",
+          session_id: SESSION_ID,
+          action_id: ACTION_ID,
+          patch_hash: HASH,
+          base_hash: HASH,
+          status: "approved",
+          created_at: 1,
+          expires_at: 2,
+        },
+        verification: {
+          session_id: SESSION_ID,
+          round: 1,
+          command_id: "test-command",
+          exit_code: 1,
+          duration_ms: 10,
+          status: "completed",
+          timed_out: 0,
+          summary: "verification failed",
+        },
+        action: { result_summary: "verification failed" },
+      });
     });
   });
 
@@ -727,11 +778,13 @@ describe("session event persistence", () => {
   it("rejects applied-patch result when the approved approval names another action", async () => {
     await withFileRepository(async (repository, databasePath) => {
       await createAwaitingApprovalSession(repository);
-      await repository.append(
-        approvalEvent(1, at(4), {
-          actionId: "another-action",
-          status: "approved",
-        }),
+      await expectRejected(
+        repository.append(
+          approvalEvent(1, at(4), {
+            actionId: "another-action",
+          }),
+        ),
+        "INVALID_EVENT_SEQUENCE",
       );
       const timelineBefore = await repository.loadTimeline(SESSION_ID);
 
@@ -754,6 +807,184 @@ describe("session event persistence", () => {
           .get(ACTION_ID),
       );
       expect(action).toEqual({ result_summary: null });
+    });
+  });
+
+  it("persists a pending approval only for the same propose-patch action after ask", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createAwaitingApprovalSession(repository);
+      const event = approvalEvent(1, at(4), {
+        patchHash: "b".repeat(64),
+        baseHash: "c".repeat(64),
+        createdAt: 100,
+        expiresAt: 200,
+      });
+
+      await repository.append(event);
+
+      expect((await repository.loadTimeline(SESSION_ID)).at(-1)).toEqual(event);
+      expect(
+        inspectDatabase(databasePath, (database) =>
+          database.prepare("SELECT * FROM approvals").get(),
+        ),
+      ).toEqual({
+        id: "approval-1",
+        session_id: SESSION_ID,
+        action_id: ACTION_ID,
+        patch_hash: "b".repeat(64),
+        base_hash: "c".repeat(64),
+        status: "pending",
+        created_at: 100,
+        expires_at: 200,
+      });
+    });
+  });
+
+  it.each([
+    [
+      "wrong action id",
+      async (repository: SessionRepository) => {
+        await createAwaitingApprovalSession(repository);
+      },
+      { actionId: "wrong-action" },
+    ],
+    [
+      "non-propose action",
+      async (repository: SessionRepository) => {
+        await createRunningSession(repository);
+        await repository.append(actionEvent(1, at(1), "read_file"));
+        await repository.append(policyEvent(1, at(2), "ask"));
+        await repository.append(stateEvent(1, at(3), "awaiting_approval"));
+      },
+      {},
+    ],
+    [
+      "missing policy",
+      async (repository: SessionRepository) => {
+        await createRunningSession(repository);
+        await repository.append(actionEvent(1, at(1), "propose_patch"));
+        await repository.append(stateEvent(1, at(2), "awaiting_approval"));
+      },
+      {},
+    ],
+    [
+      "non-ask policy",
+      async (repository: SessionRepository) => {
+        await createRunningSession(repository);
+        await repository.append(actionEvent(1, at(1), "propose_patch"));
+        await repository.append(policyEvent(1, at(2), "allow"));
+        await repository.append(stateEvent(1, at(3), "awaiting_approval"));
+      },
+      {},
+    ],
+  ] as const)(
+    "rejects pending approval with %s",
+    async (_label, setup, overrides) => {
+      await withFileRepository(async (repository, databasePath) => {
+        await setup(repository);
+        const before = businessSnapshot(databasePath);
+
+        await expectRejected(
+          repository.append(
+            approvalEvent(
+              (await repository.loadSession(SESSION_ID))?.round ?? 1,
+              at(4),
+              overrides,
+            ),
+          ),
+          "INVALID_EVENT_SEQUENCE",
+        );
+        expect(businessSnapshot(databasePath)).toEqual(before);
+      });
+    },
+  );
+
+  it("classifies pending approval replay and a second approval id as duplicate records", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createAwaitingApprovalSession(repository);
+      const pending = approvalEvent(1, at(4));
+      await repository.append(pending);
+      const before = businessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.append({ ...pending, occurredAt: at(5) }),
+        "DUPLICATE_RECORD",
+      );
+      await expectRejected(
+        repository.append(
+          approvalEvent(1, at(5), { approvalId: "approval-2" }),
+        ),
+        "DUPLICATE_RECORD",
+      );
+      expect(businessSnapshot(databasePath)).toEqual(before);
+    });
+  });
+
+  it.each(["approved", "rejected", "expired"] as const)(
+    "transitions pending approval to %s with immutable metadata",
+    async (status) => {
+      await withFileRepository(async (repository, databasePath) => {
+        await createAwaitingApprovalSession(repository);
+        await repository.append(approvalEvent(1, at(4)));
+        const terminal = approvalEvent(1, at(5), { status });
+
+        await repository.append(terminal);
+
+        expect((await repository.loadTimeline(SESSION_ID)).at(-1)).toEqual(
+          terminal,
+        );
+        expect(
+          inspectDatabase(databasePath, (database) =>
+            database
+              .prepare("SELECT status FROM approvals WHERE id = ?")
+              .get("approval-1"),
+          ),
+        ).toEqual({ status });
+      });
+    },
+  );
+
+  it("rejects invalid approval transitions and metadata changes without partial writes", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createAwaitingApprovalSession(repository);
+      await repository.append(approvalEvent(1, at(4)));
+      await repository.append(
+        approvalEvent(1, at(5), { status: "approved" }),
+      );
+      const before = businessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.append(
+          approvalEvent(1, at(6), { status: "approved" }),
+        ),
+        "DUPLICATE_RECORD",
+      );
+      for (const details of [
+        { status: "pending" as const },
+        { status: "rejected" as const },
+        { status: "approved" as const, patchHash: "b".repeat(64) },
+        { status: "approved" as const, actionId: "wrong-action" },
+        { status: "approved" as const, createdAt: 0 },
+        { status: "approved" as const, expiresAt: 3 },
+      ]) {
+        await expectRejected(
+          repository.append(approvalEvent(1, at(6), details)),
+          "INVALID_EVENT_SEQUENCE",
+        );
+      }
+      expect(businessSnapshot(databasePath)).toEqual(before);
+    });
+  });
+
+  it("rejects a terminal approval without an existing pending row", async () => {
+    await withRepository(async (repository) => {
+      await createAwaitingApprovalSession(repository);
+      await expectRejected(
+        repository.append(
+          approvalEvent(1, at(4), { status: "approved" }),
+        ),
+        "INVALID_EVENT_SEQUENCE",
+      );
     });
   });
 
@@ -950,6 +1181,243 @@ describe("session event persistence", () => {
       await expect(repository.loadTimeline("missing-session")).resolves.toEqual(
         [],
       );
+    });
+  });
+
+  it("persists a run-verification fact and overwrites its action result summary", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository);
+      await repository.append(
+        actionEvent(1, at(1), "run_verification", ACTION_ID, "verify"),
+      );
+      await repository.append(policyEvent(1, at(2), "allow"));
+      const verification = verificationEvent(1, at(3), {
+        exitCode: 0,
+        durationMs: 25,
+      });
+
+      await repository.append(verification);
+
+      expect((await repository.loadTimeline(SESSION_ID)).at(-1)).toEqual(
+        verification,
+      );
+      expect(
+        inspectDatabase(databasePath, (database) => ({
+          verification: database
+            .prepare(`
+              SELECT
+                session_id,
+                round,
+                command_id,
+                exit_code,
+                duration_ms,
+                status,
+                timed_out,
+                summary
+              FROM verification_runs
+            `)
+            .get(),
+          action: database
+            .prepare("SELECT result_summary FROM action_records WHERE action_id = ?")
+            .get(ACTION_ID),
+        })),
+      ).toEqual({
+        verification: {
+          session_id: SESSION_ID,
+          round: 1,
+          command_id: "test-command",
+          exit_code: 0,
+          duration_ms: 25,
+          status: "completed",
+          timed_out: 0,
+          summary: "verification failed",
+        },
+        action: { result_summary: "verification failed" },
+      });
+    });
+  });
+
+  it("persists round-zero initial verification for test repair without an action", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await repository.createSession(validSession());
+
+      await repository.append(verificationEvent(0, at(1)));
+
+      expect(
+        inspectDatabase(databasePath, (database) => ({
+          actions: (
+            database.prepare("SELECT count(*) AS count FROM action_records").get() as {
+              count: number;
+            }
+          ).count,
+          verifications: (
+            database.prepare("SELECT count(*) AS count FROM verification_runs").get() as {
+              count: number;
+            }
+          ).count,
+        })),
+      ).toEqual({ actions: 0, verifications: 1 });
+    });
+  });
+
+  it("requires the selected verification command id", async () => {
+    await withRepository(async (repository) => {
+      await repository.createSession(validSession());
+      await expectRejected(
+        repository.append(
+          verificationEvent(0, at(1), { commandId: "other-command" }),
+        ),
+        "INVALID_EVENT_SEQUENCE",
+      );
+    });
+  });
+
+  it.each(["test_repair", "feature_implementation"] as const)(
+    "allows %s awaiting-approval verification only after normalized approval and earlier applied patch facts",
+    async (taskKind) => {
+      await withFileRepository(async (repository, databasePath) => {
+        await createApprovedAppliedPatchSession(repository, { taskKind });
+
+        await repository.append(verificationEvent(1, at(7)));
+
+        expect(
+          inspectDatabase(databasePath, (database) =>
+            database
+              .prepare("SELECT count(*) AS count FROM verification_runs")
+              .get(),
+          ),
+        ).toEqual({ count: 1 });
+      });
+    },
+  );
+
+  it.each([
+    [
+      "missing terminal approval and applied patch",
+      async (repository: SessionRepository) => {
+        await createAwaitingApprovalSession(repository);
+      },
+      undefined,
+    ],
+    [
+      "pending approval only",
+      async (repository: SessionRepository) => {
+        await createAwaitingApprovalSession(repository);
+        await repository.append(approvalEvent(1, at(4)));
+      },
+      undefined,
+    ],
+    [
+      "approved approval without applied patch",
+      async (repository: SessionRepository) => {
+        await createAwaitingApprovalSession(repository);
+        await repository.append(approvalEvent(1, at(4)));
+        await repository.append(
+          approvalEvent(1, at(5), { status: "approved" }),
+        );
+      },
+      undefined,
+    ],
+    [
+      "result summary without applied patch fact",
+      async (repository: SessionRepository) => {
+        await createAwaitingApprovalSession(repository);
+        await repository.append(approvalEvent(1, at(4)));
+        await repository.append(
+          approvalEvent(1, at(5), { status: "approved" }),
+        );
+      },
+      "inject-result",
+    ],
+    [
+      "deleted normalized approval",
+      async (repository: SessionRepository) => {
+        await createApprovedAppliedPatchSession(repository);
+      },
+      "delete-approval",
+    ],
+  ] as const)(
+    "rejects awaiting-approval verification with %s",
+    async (_label, setup, corruption) => {
+      await withFileRepository(async (repository, databasePath) => {
+        await setup(repository);
+        if (corruption === "inject-result") {
+          inspectDatabase(databasePath, (database) => {
+            database
+              .prepare("UPDATE action_records SET result_summary = ? WHERE action_id = ?")
+              .run("looks applied", ACTION_ID);
+          });
+        } else if (corruption === "delete-approval") {
+          inspectDatabase(databasePath, (database) => {
+            database.prepare("DELETE FROM approvals WHERE id = ?").run("approval-1");
+          });
+        }
+        const before = businessSnapshot(databasePath);
+
+        await expectRejected(
+          repository.append(verificationEvent(1, at(7))),
+          "INVALID_EVENT_SEQUENCE",
+        );
+        expect(businessSnapshot(databasePath)).toEqual(before);
+      });
+    },
+  );
+
+  it("redacts verification summary in timeline, normalized row, and action result", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository);
+      await repository.append(
+        actionEvent(1, at(1), "run_verification"),
+      );
+      await repository.append(policyEvent(1, at(2), "allow"));
+      const secret = "sk-abcdefghijklmnopqrstuv";
+      const event = {
+        ...verificationEvent(1, at(3)),
+        summary: `verification ${secret}`,
+      };
+
+      await repository.append(event);
+
+      const stored = inspectDatabase(databasePath, (database) => ({
+        timeline: database
+          .prepare("SELECT summary FROM timeline_events WHERE kind = 'verification'")
+          .get(),
+        verification: database
+          .prepare("SELECT summary FROM verification_runs")
+          .get(),
+        action: database
+          .prepare("SELECT result_summary FROM action_records WHERE action_id = ?")
+          .get(ACTION_ID),
+      }));
+      expect(stored).toEqual({
+        timeline: { summary: "verification [REDACTED]" },
+        verification: { summary: "verification [REDACTED]" },
+        action: { result_summary: "verification [REDACTED]" },
+      });
+      expect(JSON.stringify(stored)).not.toContain(secret);
+    });
+  });
+
+  it("allows legitimately identical verification runs", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository);
+      await repository.append(
+        actionEvent(1, at(1), "run_verification"),
+      );
+      await repository.append(policyEvent(1, at(2), "allow"));
+      const verification = verificationEvent(1, at(3));
+
+      await repository.append(verification);
+      await repository.append(verification);
+
+      expect(
+        inspectDatabase(databasePath, (database) =>
+          database
+            .prepare("SELECT count(*) AS count FROM verification_runs")
+            .get(),
+        ),
+      ).toEqual({ count: 2 });
+      expect(await repository.loadTimeline(SESSION_ID)).toHaveLength(5);
     });
   });
 
@@ -1306,12 +1774,56 @@ describe("session event persistence", () => {
       () => verificationEvent(0, at(1), { durationMs: -1 }),
     ],
     [
+      "unsafe duration",
+      () =>
+        verificationEvent(0, at(1), {
+          durationMs: Number.MAX_SAFE_INTEGER + 1,
+        }),
+    ],
+    [
+      "unsafe exit code",
+      () =>
+        verificationEvent(0, at(1), {
+          exitCode: Number.MAX_SAFE_INTEGER + 1,
+        }),
+    ],
+    [
+      "exit code for non-completed status",
+      () =>
+        verificationEvent(0, at(1), {
+          exitCode: 1,
+          status: "spawn_failed",
+        }),
+    ],
+    [
+      "timedOut true for completed status",
+      () => verificationEvent(0, at(1), { timedOut: true }),
+    ],
+    [
       "invalid approval hash",
       () => approvalEvent(0, at(1), { patchHash: SENTINEL }),
     ],
     [
+      "uppercase approval hash",
+      () => approvalEvent(0, at(1), { baseHash: "A".repeat(64) }),
+    ],
+    [
       "invalid approval times",
       () => approvalEvent(0, at(1), { createdAt: 2, expiresAt: 2 }),
+    ],
+    [
+      "unsafe approval time",
+      () =>
+        approvalEvent(0, at(1), {
+          expiresAt: Number.MAX_SAFE_INTEGER + 1,
+        }),
+    ],
+    [
+      "approval time beyond Date range",
+      () =>
+        approvalEvent(0, at(1), {
+          expiresAt: 8_640_000_000_000_001,
+        }),
     ],
   ])("rejects runtime field validation case %s", async (_label, buildEvent) => {
     await withRepository(async (repository) => {
@@ -1488,6 +2000,125 @@ describe("session event persistence", () => {
         if (_label === "action record insert" || _label === "action round update") {
           expect(rows.action).toBeNull();
         }
+      });
+    },
+  );
+
+  it.each([
+    [
+      "approval insert",
+      async (repository: SessionRepository) => {
+        await createAwaitingApprovalSession(repository);
+      },
+      `CREATE TRIGGER task5_fail BEFORE INSERT ON approvals
+       BEGIN SELECT RAISE(ABORT, '${SENTINEL}'); END`,
+      (repository: SessionRepository) =>
+        repository.append(approvalEvent(1, at(4))),
+    ],
+    [
+      "approval update",
+      async (repository: SessionRepository) => {
+        await createAwaitingApprovalSession(repository);
+        await repository.append(approvalEvent(1, at(4)));
+      },
+      `CREATE TRIGGER task5_fail BEFORE UPDATE OF status ON approvals
+       BEGIN SELECT RAISE(ABORT, '${SENTINEL}'); END`,
+      (repository: SessionRepository) =>
+        repository.append(
+          approvalEvent(1, at(5), { status: "approved" }),
+        ),
+    ],
+    [
+      "verification insert",
+      async (repository: SessionRepository) => {
+        await createRunningSession(repository);
+        await repository.append(
+          actionEvent(1, at(1), "run_verification"),
+        );
+        await repository.append(policyEvent(1, at(2), "allow"));
+      },
+      `CREATE TRIGGER task5_fail BEFORE INSERT ON verification_runs
+       BEGIN SELECT RAISE(ABORT, '${SENTINEL}'); END`,
+      (repository: SessionRepository) =>
+        repository.append(verificationEvent(1, at(3))),
+    ],
+  ] as const)(
+    "rolls back Task 5 transaction when %s fails",
+    async (_label, setup, triggerSql, append) => {
+      await withFileRepository(async (repository, databasePath) => {
+        await setup(repository);
+        const before = businessSnapshot(databasePath);
+        const sessionBefore = await repository.loadSession(SESSION_ID);
+        inspectDatabase(databasePath, (database) => database.exec(triggerSql));
+
+        const error = await expectRejected(
+          append(repository),
+          "PERSISTENCE_FAILED",
+        );
+
+        expect(visibleErrorText(error)).not.toContain(SENTINEL);
+        expect(businessSnapshot(databasePath)).toEqual(before);
+        expect(await repository.loadSession(SESSION_ID)).toEqual(sessionBefore);
+      });
+    },
+  );
+
+  it.each([
+    [
+      "AFTER approval insert delete",
+      async (repository: SessionRepository) => {
+        await createAwaitingApprovalSession(repository);
+      },
+      `CREATE TRIGGER task5_corrupt AFTER INSERT ON approvals
+       BEGIN DELETE FROM approvals WHERE id = NEW.id; END`,
+      (repository: SessionRepository) =>
+        repository.append(approvalEvent(1, at(4))),
+    ],
+    [
+      "AFTER approval update modification",
+      async (repository: SessionRepository) => {
+        await createAwaitingApprovalSession(repository);
+        await repository.append(approvalEvent(1, at(4)));
+      },
+      `CREATE TRIGGER task5_corrupt AFTER UPDATE OF status ON approvals
+       BEGIN
+         UPDATE approvals SET patch_hash = '${"b".repeat(64)}'
+         WHERE id = NEW.id;
+       END`,
+      (repository: SessionRepository) =>
+        repository.append(
+          approvalEvent(1, at(5), { status: "approved" }),
+        ),
+    ],
+    [
+      "AFTER verification insert delete",
+      async (repository: SessionRepository) => {
+        await createRunningSession(repository);
+        await repository.append(
+          actionEvent(1, at(1), "run_verification"),
+        );
+        await repository.append(policyEvent(1, at(2), "allow"));
+      },
+      `CREATE TRIGGER task5_corrupt AFTER INSERT ON verification_runs
+       BEGIN DELETE FROM verification_runs WHERE run_id = NEW.run_id; END`,
+      (repository: SessionRepository) =>
+        repository.append(verificationEvent(1, at(3))),
+    ],
+  ] as const)(
+    "rolls back when %s makes changes=1 a false success",
+    async (_label, setup, triggerSql, append) => {
+      await withFileRepository(async (repository, databasePath) => {
+        await setup(repository);
+        const before = businessSnapshot(databasePath);
+        inspectDatabase(databasePath, (database) => database.exec(triggerSql));
+
+        const error = await expectRejected(
+          append(repository),
+          "PERSISTENCE_FAILED",
+        );
+
+        expect(visibleErrorText(error)).not.toContain(SENTINEL);
+        expect(businessSnapshot(databasePath)).toEqual(before);
       });
     },
   );

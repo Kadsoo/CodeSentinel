@@ -94,6 +94,29 @@ type ActionRecord = Readonly<{
   resultSummary: string | null;
 }>;
 
+type ApprovalRecord = Readonly<{
+  approvalId: string;
+  sessionId: string;
+  actionId: string;
+  patchHash: string;
+  baseHash: string;
+  status: ApprovalStatus;
+  createdAt: number;
+  expiresAt: number;
+}>;
+
+type VerificationRecord = Readonly<{
+  eventId: number;
+  sessionId: string;
+  round: number;
+  commandId: string;
+  exitCode: number | null;
+  durationMs: number;
+  status: VerificationStatus;
+  timedOut: boolean;
+  summary: string;
+}>;
+
 type TimelineInsertParameters = Readonly<{
   sessionId: string;
   round: number;
@@ -657,6 +680,110 @@ function mapActionRecordRow(
   }
 }
 
+function mapApprovalRecordRow(value: unknown): ApprovalRecord {
+  try {
+    if (typeof value !== "object" || value === null) {
+      throw persistenceError("PERSISTENCE_FAILED");
+    }
+    const row = value as Readonly<Record<string, unknown>>;
+    const approvalId = row.id;
+    const sessionId = row.session_id;
+    const actionId = row.action_id;
+    const patchHash = row.patch_hash;
+    const baseHash = row.base_hash;
+    const status = row.status;
+    const createdAt = row.created_at;
+    const expiresAt = row.expires_at;
+    assertIdentifier(approvalId);
+    assertIdentifier(sessionId);
+    assertIdentifier(actionId);
+    if (
+      typeof patchHash !== "string" ||
+      !SHA_256.test(patchHash) ||
+      typeof baseHash !== "string" ||
+      !SHA_256.test(baseHash) ||
+      !isApprovalStatus(status)
+    ) {
+      throw persistenceError("PERSISTENCE_FAILED");
+    }
+    assertApprovalTimestamp(createdAt);
+    assertApprovalTimestamp(expiresAt);
+    if (expiresAt <= createdAt) {
+      throw persistenceError("PERSISTENCE_FAILED");
+    }
+    return Object.freeze({
+      approvalId,
+      sessionId,
+      actionId,
+      patchHash,
+      baseHash,
+      status,
+      createdAt,
+      expiresAt,
+    });
+  } catch {
+    throw persistenceError("PERSISTENCE_FAILED");
+  }
+}
+
+function mapVerificationRecordRow(value: unknown): VerificationRecord {
+  try {
+    if (typeof value !== "object" || value === null) {
+      throw persistenceError("PERSISTENCE_FAILED");
+    }
+    const row = value as Readonly<Record<string, unknown>>;
+    const eventId = row.event_id;
+    const sessionId = row.session_id;
+    const round = row.round;
+    const commandId = row.command_id;
+    const exitCode = row.exit_code;
+    const durationMs = row.duration_ms;
+    const status = row.status;
+    const timedOut = row.timed_out;
+    const summary = row.summary;
+    if (
+      typeof eventId !== "number" ||
+      !Number.isSafeInteger(eventId) ||
+      eventId < 1
+    ) {
+      throw persistenceError("PERSISTENCE_FAILED");
+    }
+    assertIdentifier(sessionId);
+    assertRound(round);
+    assertIdentifier(commandId);
+    if (
+      (exitCode !== null &&
+        (typeof exitCode !== "number" ||
+          !Number.isSafeInteger(exitCode))) ||
+      !isVerificationStatus(status) ||
+      (timedOut !== 0 && timedOut !== 1)
+    ) {
+      throw persistenceError("PERSISTENCE_FAILED");
+    }
+    assertSafeNonNegativeInteger(durationMs);
+    assertRedactedStoredSummary(summary);
+    if (
+      (status !== "completed" && exitCode !== null) ||
+      (timedOut === 1) !== (status === "timed_out")
+    ) {
+      throw persistenceError("PERSISTENCE_FAILED");
+    }
+    return Object.freeze({
+      eventId,
+      sessionId,
+      round,
+      commandId,
+      exitCode,
+      durationMs,
+      status,
+      timedOut: timedOut === 1,
+      summary,
+    });
+  } catch {
+    throw persistenceError("PERSISTENCE_FAILED");
+  }
+}
+
 const TIMELINE_TYPE_COLUMNS = Object.freeze([
   "action_id",
   "action_kind",
@@ -1036,6 +1163,69 @@ function actionRecordsEqual(
   );
 }
 
+function approvalRecordsEqual(
+  actual: ApprovalRecord,
+  expected: ApprovalRecord,
+): boolean {
+  return (
+    actual.approvalId === expected.approvalId &&
+    actual.sessionId === expected.sessionId &&
+    actual.actionId === expected.actionId &&
+    actual.patchHash === expected.patchHash &&
+    actual.baseHash === expected.baseHash &&
+    actual.status === expected.status &&
+    actual.createdAt === expected.createdAt &&
+    actual.expiresAt === expected.expiresAt
+  );
+}
+
+function verificationRecordsEqual(
+  actual: VerificationRecord,
+  expected: VerificationRecord,
+): boolean {
+  return (
+    actual.eventId === expected.eventId &&
+    actual.sessionId === expected.sessionId &&
+    actual.round === expected.round &&
+    actual.commandId === expected.commandId &&
+    actual.exitCode === expected.exitCode &&
+    actual.durationMs === expected.durationMs &&
+    actual.status === expected.status &&
+    actual.timedOut === expected.timedOut &&
+    actual.summary === expected.summary
+  );
+}
+
+function approvalRecordFromEvent(
+  event: Extract<HarnessEvent, { kind: "approval" }>,
+): ApprovalRecord {
+  return Object.freeze({
+    approvalId: event.details.approvalId,
+    sessionId: event.sessionId,
+    actionId: event.details.actionId,
+    patchHash: event.details.patchHash,
+    baseHash: event.details.baseHash,
+    status: event.details.status,
+    createdAt: event.details.createdAt,
+    expiresAt: event.details.expiresAt,
+  });
+}
+
+function approvalMetadataEqual(
+  approval: ApprovalRecord,
+  event: Extract<HarnessEvent, { kind: "approval" }>,
+): boolean {
+  return (
+    approval.approvalId === event.details.approvalId &&
+    approval.sessionId === event.sessionId &&
+    approval.actionId === event.details.actionId &&
+    approval.patchHash === event.details.patchHash &&
+    approval.baseHash === event.details.baseHash &&
+    approval.createdAt === event.details.createdAt &&
+    approval.expiresAt === event.details.expiresAt
+  );
+}
+
 function expectedSessionAfterEvent(
   session: PersistedSession,
   event: HarnessEvent,
@@ -1077,9 +1267,15 @@ function expectedActionAfterEvent(
         ...actionBefore,
         resultSummary: event.summary,
       });
+    case "verification":
+      return event.round === 0 || actionBefore === undefined
+        ? actionBefore
+        : Object.freeze({
+            ...actionBefore,
+            resultSummary: event.summary,
+          });
     case "approval":
     case "state":
-    case "verification":
       return actionBefore;
   }
 }
@@ -1155,15 +1351,58 @@ export function createSessionRepository(databasePath: string): SessionRepository
       FROM action_records
       WHERE session_id = ? AND round = ?
     `);
+    const selectApprovalById = database.prepare(`
+      SELECT
+        id,
+        session_id,
+        action_id,
+        patch_hash,
+        base_hash,
+        status,
+        created_at,
+        expires_at
+      FROM approvals
+      WHERE id = ?
+    `);
+    const selectApprovalForAction = database.prepare(`
+      SELECT
+        id,
+        session_id,
+        action_id,
+        patch_hash,
+        base_hash,
+        status,
+        created_at,
+        expires_at
+      FROM approvals
+      WHERE action_id = ?
+    `);
     const selectApprovedApproval = database.prepare(`
+      SELECT
+        id,
+        session_id,
+        action_id,
+        patch_hash,
+        base_hash,
+        status,
+        created_at,
+        expires_at
+      FROM approvals
+      WHERE
+        session_id = ?
+        AND action_id = ?
+        AND status = 'approved'
+      LIMIT 1
+    `);
+    const selectEarlierAppliedPatch = database.prepare(`
       SELECT event_id
       FROM timeline_events
       WHERE
         session_id = ?
         AND round = ?
-        AND kind = 'approval'
-        AND approval_action_id = ?
-        AND approval_status = 'approved'
+        AND kind = 'tool_result'
+        AND tool_kind = 'apply_approved_patch'
+        AND event_id < ?
       ORDER BY event_id DESC
       LIMIT 1
     `);
@@ -1237,6 +1476,55 @@ export function createSessionRepository(databasePath: string): SessionRepository
         NULL
       )
     `);
+    const insertApproval = database.prepare(`
+      INSERT INTO approvals (
+        id,
+        session_id,
+        action_id,
+        patch_hash,
+        base_hash,
+        status,
+        created_at,
+        expires_at
+      ) VALUES (
+        @approvalId,
+        @sessionId,
+        @actionId,
+        @patchHash,
+        @baseHash,
+        @status,
+        @createdAt,
+        @expiresAt
+      )
+    `);
+    const updateApprovalStatus = database.prepare(`
+      UPDATE approvals
+      SET status = @status
+      WHERE id = @approvalId AND action_id = @actionId AND status = 'pending'
+    `);
+    const insertVerificationRun = database.prepare(`
+      INSERT INTO verification_runs (
+        event_id,
+        session_id,
+        round,
+        command_id,
+        exit_code,
+        duration_ms,
+        status,
+        timed_out,
+        summary
+      ) VALUES (
+        @eventId,
+        @sessionId,
+        @round,
+        @commandId,
+        @exitCode,
+        @durationMs,
+        @status,
+        @timedOut,
+        @summary
+      )
+    `);
     const updateActionPolicy = database.prepare(`
       UPDATE action_records
       SET policy_decision = @decision
@@ -1252,6 +1540,11 @@ export function createSessionRepository(databasePath: string): SessionRepository
         session_id = @sessionId
         AND round = @round
         AND result_summary IS NULL
+    `);
+    const overwriteActionResult = database.prepare(`
+      UPDATE action_records
+      SET result_summary = @resultSummary
+      WHERE session_id = @sessionId AND round = @round
     `);
     const updateSessionState = database.prepare(`
       UPDATE sessions
@@ -1334,6 +1627,84 @@ export function createSessionRepository(databasePath: string): SessionRepository
       FROM timeline_events
       WHERE session_id = ?
     `);
+    const selectApprovalCount = database.prepare(`
+      SELECT count(*) AS count
+      FROM approvals
+    `);
+    const selectSessionApprovalCount = database.prepare(`
+      SELECT count(*) AS count
+      FROM approvals
+      WHERE session_id = ?
+    `);
+    const selectVerificationCount = database.prepare(`
+      SELECT count(*) AS count
+      FROM verification_runs
+    `);
+    const selectSessionVerificationCount = database.prepare(`
+      SELECT count(*) AS count
+      FROM verification_runs
+      WHERE session_id = ?
+    `);
+    const selectVerificationByEventId = database.prepare(`
+      SELECT
+        event_id,
+        session_id,
+        round,
+        command_id,
+        exit_code,
+        duration_ms,
+        status,
+        timed_out,
+        summary
+      FROM verification_runs
+      WHERE event_id = ?
+    `);
+    function approvedApproval(
+      sessionId: string,
+      actionId: string,
+    ): ApprovalRecord | undefined {
+      const row = selectApprovedApproval.get(sessionId, actionId);
+      if (row === undefined) {
+        return undefined;
+      }
+      const approval = mapApprovalRecordRow(row);
+      if (
+        approval.sessionId !== sessionId ||
+        approval.actionId !== actionId ||
+        approval.status !== "approved"
+      ) {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+      return approval;
+    }
+
+    function hasEarlierAppliedPatch(
+      sessionId: string,
+      round: number,
+      beforeEventId: number,
+    ): boolean {
+      const row = selectEarlierAppliedPatch.get(
+        sessionId,
+        round,
+        beforeEventId,
+      );
+      if (row === undefined) {
+        return false;
+      }
+      if (typeof row !== "object" || row === null) {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+      const eventId = (row as Readonly<Record<string, unknown>>).event_id;
+      if (
+        typeof eventId !== "number" ||
+        !Number.isSafeInteger(eventId) ||
+        eventId < 1 ||
+        eventId >= beforeEventId
+      ) {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+      return true;
+    }
     const createSessionTransaction = database.transaction(
       (
         input: CreatePersistedSessionInput,
@@ -1405,6 +1776,7 @@ export function createSessionRepository(databasePath: string): SessionRepository
         action === undefined &&
         (event.kind === "policy" ||
           event.kind === "tool_result" ||
+          event.kind === "approval" ||
           (event.kind === "verification" && event.round > 0))
       ) {
         throw persistenceError("INVALID_EVENT_SEQUENCE");
@@ -1422,11 +1794,7 @@ export function createSessionRepository(databasePath: string): SessionRepository
           if (
             action.actionKind !== "propose_patch" ||
             action.policyDecision !== "ask" ||
-            selectApprovedApproval.get(
-              event.sessionId,
-              event.round,
-              action.actionId,
-            ) === undefined
+            approvedApproval(event.sessionId, action.actionId) === undefined
           ) {
             throw persistenceError("INVALID_EVENT_SEQUENCE");
           }
@@ -1435,6 +1803,58 @@ export function createSessionRepository(databasePath: string): SessionRepository
           action.policyDecision !== "allow"
         ) {
           throw persistenceError("INVALID_EVENT_SEQUENCE");
+        }
+      } else if (event.kind === "approval") {
+        if (action === undefined) {
+          throw persistenceError("INVALID_EVENT_SEQUENCE");
+        }
+        if (
+          action.actionId !== event.details.actionId ||
+          action.actionKind !== "propose_patch" ||
+          action.policyDecision !== "ask"
+        ) {
+          throw persistenceError("INVALID_EVENT_SEQUENCE");
+        }
+        const approvalByIdRow = selectApprovalById.get(
+          event.details.approvalId,
+        );
+        const approvalForActionRow = selectApprovalForAction.get(
+          action.actionId,
+        );
+        const approvalById =
+          approvalByIdRow === undefined
+            ? undefined
+            : mapApprovalRecordRow(approvalByIdRow);
+        const approvalForAction =
+          approvalForActionRow === undefined
+            ? undefined
+            : mapApprovalRecordRow(approvalForActionRow);
+
+        if (event.details.status === "pending") {
+          if (
+            approvalForAction !== undefined &&
+            approvalForAction.status !== "pending"
+          ) {
+            throw persistenceError("INVALID_EVENT_SEQUENCE");
+          }
+          if (approvalById !== undefined || approvalForAction !== undefined) {
+            throw persistenceError("DUPLICATE_RECORD");
+          }
+        } else {
+          if (
+            approvalById === undefined ||
+            approvalForAction === undefined ||
+            approvalById.approvalId !== approvalForAction.approvalId ||
+            !approvalMetadataEqual(approvalById, event)
+          ) {
+            throw persistenceError("INVALID_EVENT_SEQUENCE");
+          }
+          if (approvalById.status === event.details.status) {
+            throw persistenceError("DUPLICATE_RECORD");
+          }
+          if (approvalById.status !== "pending") {
+            throw persistenceError("INVALID_EVENT_SEQUENCE");
+          }
         }
       } else if (event.kind === "verification" && event.round > 0) {
         if (action === undefined) {
@@ -1448,7 +1868,8 @@ export function createSessionRepository(databasePath: string): SessionRepository
           (session.state === "awaiting_approval" &&
             (action.actionKind !== "propose_patch" ||
               action.policyDecision !== "ask" ||
-              action.resultSummary === null))
+              approvedApproval(event.sessionId, action.actionId) ===
+                undefined))
         ) {
           throw persistenceError("INVALID_EVENT_SEQUENCE");
         }
@@ -1461,6 +1882,16 @@ export function createSessionRepository(databasePath: string): SessionRepository
       );
       const sessionTimelineCountBefore = storedCount(
         selectSessionTimelineCount.get(event.sessionId),
+      );
+      const approvalCountBefore = storedCount(selectApprovalCount.get());
+      const sessionApprovalCountBefore = storedCount(
+        selectSessionApprovalCount.get(event.sessionId),
+      );
+      const verificationCountBefore = storedCount(
+        selectVerificationCount.get(),
+      );
+      const sessionVerificationCountBefore = storedCount(
+        selectSessionVerificationCount.get(event.sessionId),
       );
       const timelineResult = insertTimelineEvent.run(
         timelineInsertParameters(event),
@@ -1525,9 +1956,59 @@ export function createSessionRepository(databasePath: string): SessionRepository
           }
           break;
         }
-        case "approval":
-        case "verification":
+        case "approval": {
+          const details = approvalRecordFromEvent(event);
+          const changes =
+            event.details.status === "pending"
+              ? insertApproval.run(details).changes
+              : updateApprovalStatus.run({
+                  approvalId: event.details.approvalId,
+                  actionId: event.details.actionId,
+                  status: event.details.status,
+                }).changes;
+          if (changes !== 1) {
+            throw persistenceError("PERSISTENCE_FAILED");
+          }
           break;
+        }
+        case "verification": {
+          if (
+            event.round > 0 &&
+            session.state === "awaiting_approval" &&
+            !hasEarlierAppliedPatch(
+              event.sessionId,
+              event.round,
+              eventId,
+            )
+          ) {
+            throw persistenceError("INVALID_EVENT_SEQUENCE");
+          }
+          const verificationChanges = insertVerificationRun.run({
+            eventId,
+            sessionId: event.sessionId,
+            round: event.round,
+            commandId: event.details.commandId,
+            exitCode: event.details.exitCode,
+            durationMs: event.details.durationMs,
+            status: event.details.status,
+            timedOut: event.details.timedOut ? 1 : 0,
+            summary: event.summary,
+          }).changes;
+          if (verificationChanges !== 1) {
+            throw persistenceError("PERSISTENCE_FAILED");
+          }
+          if (event.round > 0) {
+            const actionChanges = overwriteActionResult.run({
+              resultSummary: event.summary,
+              sessionId: event.sessionId,
+              round: event.round,
+            }).changes;
+            if (actionChanges !== 1) {
+              throw persistenceError("PERSISTENCE_FAILED");
+            }
+          }
+          break;
+        }
       }
 
       if (event.kind === "action") {
@@ -1559,6 +2040,38 @@ export function createSessionRepository(databasePath: string): SessionRepository
       if (
         globalTimelineCountAfter !== globalTimelineCountBefore + 1 ||
         sessionTimelineCountAfter !== sessionTimelineCountBefore + 1
+      ) {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+      const approvalCountAfter = storedCount(selectApprovalCount.get());
+      const sessionApprovalCountAfter = storedCount(
+        selectSessionApprovalCount.get(event.sessionId),
+      );
+      const expectedApprovalDelta =
+        event.kind === "approval" &&
+        event.details.status === "pending"
+          ? 1
+          : 0;
+      if (
+        approvalCountAfter !== approvalCountBefore + expectedApprovalDelta ||
+        sessionApprovalCountAfter !==
+          sessionApprovalCountBefore + expectedApprovalDelta
+      ) {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+      const verificationCountAfter = storedCount(
+        selectVerificationCount.get(),
+      );
+      const sessionVerificationCountAfter = storedCount(
+        selectSessionVerificationCount.get(event.sessionId),
+      );
+      const expectedVerificationDelta =
+        event.kind === "verification" ? 1 : 0;
+      if (
+        verificationCountAfter !==
+          verificationCountBefore + expectedVerificationDelta ||
+        sessionVerificationCountAfter !==
+          sessionVerificationCountBefore + expectedVerificationDelta
       ) {
         throw persistenceError("PERSISTENCE_FAILED");
       }
@@ -1610,6 +2123,54 @@ export function createSessionRepository(databasePath: string): SessionRepository
           event.round,
         );
         if (!actionRecordsEqual(persistedAction, expectedAction)) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+      }
+
+      if (event.kind === "approval") {
+        const persistedApprovalRow = selectApprovalById.get(
+          event.details.approvalId,
+        );
+        if (persistedApprovalRow === undefined) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const persistedApproval = mapApprovalRecordRow(
+          persistedApprovalRow,
+        );
+        if (
+          !approvalRecordsEqual(
+            persistedApproval,
+            approvalRecordFromEvent(event),
+          )
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+      } else if (event.kind === "verification") {
+        const persistedVerificationRow =
+          selectVerificationByEventId.get(eventId);
+        if (persistedVerificationRow === undefined) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const persistedVerification = mapVerificationRecordRow(
+          persistedVerificationRow,
+        );
+        const expectedVerification = Object.freeze({
+          eventId,
+          sessionId: event.sessionId,
+          round: event.round,
+          commandId: event.details.commandId,
+          exitCode: event.details.exitCode,
+          durationMs: event.details.durationMs,
+          status: event.details.status,
+          timedOut: event.details.timedOut,
+          summary: event.summary,
+        });
+        if (
+          !verificationRecordsEqual(
+            persistedVerification,
+            expectedVerification,
+          )
+        ) {
           throw persistenceError("PERSISTENCE_FAILED");
         }
       }
