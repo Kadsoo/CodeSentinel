@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -3129,5 +3130,145 @@ describe("session event persistence", () => {
         "PERSISTENCE_FAILED",
       );
     });
+  });
+
+  it("keeps every public text ingress secret out of file bytes and securely removes a marker", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codesentinel-physical-safety-"));
+    const databasePath = join(directory, "sessions.sqlite");
+    const sentinels = {
+      append: "sk-proj-append-summary-sentinel-2001",
+      action: "sk-proj-action-summary-sentinel-2002",
+      approval: "sk-proj-approval-summary-sentinel-2003",
+      verification: "sk-proj-verification-summary-sentinel-2004",
+      memory: "sk-proj-memory-summary-sentinel-2005",
+    } as const;
+    const deletedMarker =
+      "deleted marker :: physical safety :: 2026-07-30 :: A9F4";
+    const actionId = "physical-action-1";
+    const approvalId = "physical-approval-1";
+    const createdAt = Date.parse(at(4));
+    const approvalDetails: ApprovalDetails = {
+      approvalId,
+      actionId,
+      patchHash: "b".repeat(64),
+      baseHash: HASH,
+      status: "pending",
+      createdAt,
+      expiresAt: createdAt + 15 * 60 * 1_000,
+    };
+    let repository: SessionRepository | undefined;
+
+    try {
+      repository = createSessionRepository(databasePath);
+      await repository.createSession(validSession());
+      await repository.append(
+        stateEvent(
+          0,
+          at(1),
+          "running",
+          `running ${sentinels.append}`,
+        ),
+      );
+      await repository.appendAction({
+        sessionId: SESSION_ID,
+        round: 1,
+        occurredAt: at(2),
+        actionId,
+        actionKind: "propose_patch",
+        inputSummary: `proposal ${sentinels.action}`,
+      });
+      await repository.append(policyEvent(1, at(3), "ask"));
+      await repository.append(
+        stateEvent(1, at(4), "awaiting_approval"),
+      );
+      await repository.saveApproval({
+        sessionId: SESSION_ID,
+        round: 1,
+        occurredAt: at(5),
+        summary: `pending ${sentinels.approval}`,
+        details: approvalDetails,
+      });
+      await repository.saveApproval({
+        sessionId: SESSION_ID,
+        round: 1,
+        occurredAt: at(6),
+        summary: "approved",
+        details: { ...approvalDetails, status: "approved" },
+      });
+      await repository.append(
+        toolEvent(
+          1,
+          at(7),
+          "apply_approved_patch",
+          "patch applied",
+        ),
+      );
+      await repository.appendVerification({
+        sessionId: SESSION_ID,
+        round: 1,
+        occurredAt: at(8),
+        summary: `passed ${sentinels.verification}`,
+        details: {
+          commandId: "test-command",
+          exitCode: 0,
+          durationMs: 21,
+          status: "completed",
+          timedOut: false,
+        },
+      });
+      await repository.saveSessionMemory({
+        sessionId: SESSION_ID,
+        summary: `memory ${sentinels.memory} ${deletedMarker}`,
+        updatedAt: at(9),
+      });
+
+      const publicValues = JSON.stringify({
+        timeline: await repository.loadTimeline(SESSION_ID),
+        memory: await repository.loadSessionMemory(SESSION_ID),
+      });
+      for (const sentinel of Object.values(sentinels)) {
+        expect(publicValues).not.toContain(sentinel);
+      }
+      expect(publicValues).toContain(deletedMarker);
+
+      repository.close();
+      repository = undefined;
+
+      const storedBytes = await readFile(databasePath);
+      for (const sentinel of Object.values(sentinels)) {
+        expect(storedBytes.includes(Buffer.from(sentinel, "utf8"))).toBe(
+          false,
+        );
+      }
+      expect(
+        storedBytes.includes(Buffer.from(deletedMarker, "utf8")),
+      ).toBe(true);
+
+      repository = createSessionRepository(databasePath);
+      await repository.clearSession(SESSION_ID);
+      repository.close();
+      repository = undefined;
+
+      for (const candidate of [
+        databasePath,
+        `${databasePath}-journal`,
+        `${databasePath}-wal`,
+        `${databasePath}-shm`,
+      ]) {
+        if (!existsSync(candidate)) {
+          continue;
+        }
+        const bytes = await readFile(candidate);
+        for (const sentinel of Object.values(sentinels)) {
+          expect(bytes.includes(Buffer.from(sentinel, "utf8"))).toBe(false);
+        }
+        expect(
+          bytes.includes(Buffer.from(deletedMarker, "utf8")),
+        ).toBe(false);
+      }
+    } finally {
+      repository?.close();
+      await rm(directory, { force: true, recursive: true });
+    }
   });
 });

@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -188,23 +189,54 @@ describe("persistence schema bootstrap", () => {
     });
   });
 
-  it("switches a pre-WAL file to DELETE or returns only fixed PERSISTENCE_FAILED", async () => {
-    await withDatabasePath((databasePath) => {
+  it("reopens a pre-WAL file through the public repository with a safe fixed outcome", async () => {
+    await withDatabasePath(async (databasePath) => {
+      const initialized = createSessionRepository(databasePath);
+      try {
+        await initialized.createSession(validSession());
+      } finally {
+        initialized.close();
+      }
+
       const seed = new Database(databasePath);
       try {
-        seed.pragma("journal_mode = WAL");
+        expect(seed.pragma("journal_mode = WAL", { simple: true })).toBe("wal");
       } finally {
         seed.close();
       }
 
-      let database: Database.Database | undefined;
+      let repository: ReturnType<typeof createSessionRepository> | undefined;
+      let openError: unknown;
       try {
-        database = openSessionDatabase(databasePath);
-        expect(database.pragma("journal_mode", { simple: true })).toBe("delete");
+        repository = createSessionRepository(databasePath);
       } catch (error) {
-        expectPersistenceError(error, "PERSISTENCE_FAILED");
+        openError = error;
+      }
+
+      if (openError !== undefined) {
+        expectPersistenceError(openError, "PERSISTENCE_FAILED");
+        return;
+      }
+
+      try {
+        expect(repository).toBeDefined();
       } finally {
-        database?.close();
+        repository?.close();
+      }
+      expect(existsSync(`${databasePath}-wal`)).toBe(false);
+      expect(existsSync(`${databasePath}-shm`)).toBe(false);
+
+      const readOnly = new Database(databasePath, {
+        readonly: true,
+        fileMustExist: true,
+      });
+      try {
+        expect(readOnly.pragma("journal_mode", { simple: true })).toBe("delete");
+        expect(
+          readOnly.prepare("SELECT count(*) AS count FROM sessions").get(),
+        ).toEqual({ count: 1 });
+      } finally {
+        readOnly.close();
       }
     });
   });
