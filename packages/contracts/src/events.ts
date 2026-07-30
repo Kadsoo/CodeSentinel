@@ -12,7 +12,7 @@ export type HarnessToolKind =
   | "search_text"
   | "apply_approved_patch";
 
-export type EventBase = Readonly<{
+type EventBase = Readonly<{
   sessionId: string;
   round: number;
   summary: string;

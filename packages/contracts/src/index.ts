@@ -16,7 +16,6 @@ export {
 } from "./config.js";
 export type { CodeSentinelConfig, VerificationCommand } from "./config.js";
 export type {
-  EventBase,
   EventSink,
   HarnessApprovalStatus,
   HarnessEvent,
