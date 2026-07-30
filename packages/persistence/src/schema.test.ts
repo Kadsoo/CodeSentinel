@@ -91,6 +91,34 @@ function initializeAndMutateSchema(
   }
 }
 
+function rewriteSchemaSql(
+  database: Database.Database,
+  objectName: string,
+  transform: (sql: string) => string,
+): void {
+  database.unsafeMode(true);
+  try {
+    database.pragma("writable_schema = ON");
+    const row = database
+      .prepare("SELECT sql FROM sqlite_schema WHERE name = ?")
+      .get(objectName) as { sql: string } | undefined;
+    expect(row).toBeDefined();
+    const replacement = transform(row?.sql ?? "");
+    expect(replacement).not.toBe(row?.sql);
+    database.prepare("UPDATE sqlite_schema SET sql = ? WHERE name = ?").run(
+      replacement,
+      objectName,
+    );
+    const schemaVersion = Number(
+      database.pragma("schema_version", { simple: true }),
+    );
+    database.pragma(`schema_version = ${schemaVersion + 1}`);
+  } finally {
+    database.pragma("writable_schema = OFF");
+    database.unsafeMode(false);
+  }
+}
+
 function stateEvent(): HarnessEvent {
   return {
     sessionId: "session-1",
@@ -281,6 +309,16 @@ describe("persistence schema bootstrap", () => {
     });
   });
 
+  it("rejects a version-zero nonempty database whose table begins with sqliteX", async () => {
+    await withDatabasePath((databasePath) => {
+      const seed = new Database(databasePath);
+      seed.exec("CREATE TABLE sqliteX_hidden_table (id TEXT);");
+      seed.close();
+
+      expectOpenFailure(databasePath, "UNSUPPORTED_SCHEMA_VERSION");
+    });
+  });
+
   it("rejects a version-two database", async () => {
     await withDatabasePath((databasePath) => {
       const seed = new Database(databasePath);
@@ -373,6 +411,18 @@ describe("persistence schema bootstrap", () => {
     });
   });
 
+  it("rejects a schema whose CHECK string literal differs only by case", async () => {
+    await withDatabasePath((databasePath) => {
+      initializeAndMutateSchema(databasePath, (database) => {
+        rewriteSchemaSql(database, "sessions", (sql) =>
+          sql.replace("'created'", "'CREATED'"),
+        );
+      });
+
+      expectOpenFailure(databasePath, "UNSUPPORTED_SCHEMA_VERSION");
+    });
+  });
+
   it.each([
     ["table", "CREATE TABLE extra_table (id TEXT)"],
     ["index", "CREATE INDEX extra_index ON sessions(id)"],
@@ -382,6 +432,24 @@ describe("persistence schema bootstrap", () => {
     ],
     ["view", "CREATE VIEW extra_view AS SELECT id FROM sessions"],
   ])("rejects an extra user %s", async (_kind, statement) => {
+    await withDatabasePath((databasePath) => {
+      initializeAndMutateSchema(databasePath, (database) => {
+        database.exec(statement);
+      });
+
+      expectOpenFailure(databasePath, "UNSUPPORTED_SCHEMA_VERSION");
+    });
+  });
+
+  it.each([
+    ["table", "CREATE TABLE sqliteX_hidden_table (id TEXT)"],
+    ["index", "CREATE INDEX sqliteX_hidden_index ON sessions(id)"],
+    [
+      "trigger",
+      "CREATE TRIGGER sqliteX_hidden_trigger AFTER INSERT ON sessions BEGIN SELECT 1; END",
+    ],
+    ["view", "CREATE VIEW sqliteX_hidden_view AS SELECT id FROM sessions"],
+  ])("rejects an extra sqliteX user %s", async (_kind, statement) => {
     await withDatabasePath((databasePath) => {
       initializeAndMutateSchema(databasePath, (database) => {
         database.exec(statement);
@@ -454,6 +522,39 @@ describe("session repository initialization", () => {
     } finally {
       repository.close();
     }
+  });
+
+  it("returns DUPLICATE_RECORD when an insert reports zero changes without a native message", async () => {
+    await withDatabasePath(async (databasePath) => {
+      const repository = createSessionRepository(databasePath);
+      try {
+        const external = new Database(databasePath);
+        try {
+          external.exec(`
+            CREATE TRIGGER external_ignore_session
+            BEFORE INSERT ON sessions
+            WHEN NEW.id = 'session-ignored'
+            BEGIN
+              SELECT RAISE(IGNORE);
+            END;
+          `);
+        } finally {
+          external.close();
+        }
+
+        await expect(
+          repository.createSession(
+            validSession({
+              id: "session-ignored",
+            }),
+          ),
+        ).rejects.toMatchObject({
+          code: "DUPLICATE_RECORD",
+        });
+      } finally {
+        repository.close();
+      }
+    });
   });
 
   it("does not misclassify another session uniqueness constraint as a duplicate ID", async () => {
@@ -558,6 +659,94 @@ describe("session repository initialization", () => {
       repository.close();
     }
   });
+
+  it.each([
+    [
+      "task kind",
+      "task_kind",
+      "sk-proj-corrupt-task-kind-1234",
+      "sk-proj-corrupt-task-kind-1234",
+    ],
+    [
+      "state",
+      "state",
+      "sk-proj-corrupt-state-1234",
+      "sk-proj-corrupt-state-1234",
+    ],
+    ["round", "round", 4, undefined],
+    [
+      "workspace ID",
+      "workspace_id",
+      "workspace-sk-proj-corrupt-workspace-1234",
+      "sk-proj-corrupt-workspace-1234",
+    ],
+    [
+      "provider ID",
+      "provider_id",
+      "provider-sk-proj-corrupt-provider-1234",
+      "sk-proj-corrupt-provider-1234",
+    ],
+    [
+      "verification command ID",
+      "verification_command_id",
+      "command-sk-proj-corrupt-command-1234",
+      "sk-proj-corrupt-command-1234",
+    ],
+    [
+      "created timestamp",
+      "created_at",
+      "sk-proj-corrupt-created-at-1234",
+      "sk-proj-corrupt-created-at-1234",
+    ],
+    [
+      "updated timestamp",
+      "updated_at",
+      "sk-proj-corrupt-updated-at-1234",
+      "sk-proj-corrupt-updated-at-1234",
+    ],
+  ])(
+    "returns fixed PERSISTENCE_FAILED for a corrupt stored %s",
+    async (_label, column, corruptValue, sentinel) => {
+      await withDatabasePath(async (databasePath) => {
+        const repository = createSessionRepository(databasePath);
+        try {
+          await repository.createSession(validSession());
+          const external = new Database(databasePath);
+          try {
+            external.pragma("ignore_check_constraints = ON");
+            external
+              .prepare(`UPDATE sessions SET ${column} = ? WHERE id = ?`)
+              .run(corruptValue, "session-1");
+          } finally {
+            external.close();
+          }
+
+          let caught: unknown;
+          try {
+            await repository.loadSession("session-1");
+          } catch (error) {
+            caught = error;
+          }
+
+          expectPersistenceError(caught, "PERSISTENCE_FAILED");
+          const publicError = caught as CodeSentinelPersistenceError;
+          expect(Object.hasOwn(publicError, "cause")).toBe(false);
+          const inspection = JSON.stringify({
+            message: publicError.message,
+            stack: publicError.stack,
+            keys: Reflect.ownKeys(publicError).map(String),
+            descriptors: Object.getOwnPropertyDescriptors(publicError),
+            json: JSON.stringify(publicError),
+          });
+          if (typeof sentinel === "string") {
+            expect(inspection).not.toContain(sentinel);
+          }
+        } finally {
+          repository.close();
+        }
+      });
+    },
+  );
 
   it("allows close to be called twice", () => {
     const repository = createSessionRepository(":memory:");

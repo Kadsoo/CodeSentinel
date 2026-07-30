@@ -218,13 +218,59 @@ function normalizeSchemaSql(value: string | undefined): string {
     .toLowerCase();
 }
 
+function normalizeSchemaSqlPreservingLiterals(
+  value: string | undefined,
+): string {
+  const input = (value ?? "").trim();
+  let normalized = "";
+  let insideLiteral = false;
+  let pendingWhitespace = false;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index] ?? "";
+    if (insideLiteral) {
+      normalized += character;
+      if (character === "'") {
+        if (input[index + 1] === "'") {
+          normalized += "'";
+          index += 1;
+        } else {
+          insideLiteral = false;
+        }
+      }
+      continue;
+    }
+
+    if (character === "'") {
+      if (pendingWhitespace && normalized.length > 0) {
+        normalized += " ";
+      }
+      pendingWhitespace = false;
+      insideLiteral = true;
+      normalized += character;
+      continue;
+    }
+    if (/\s/u.test(character)) {
+      pendingWhitespace = true;
+      continue;
+    }
+    if (pendingWhitespace && normalized.length > 0) {
+      normalized += " ";
+    }
+    pendingWhitespace = false;
+    normalized += character.toLowerCase();
+  }
+
+  return normalized.trim().replace(/;$/u, "");
+}
+
 function readBootstrapState(database: Database.Database): BootstrapState {
   const version = Number(database.pragma("user_version", { simple: true }));
   const userObjects = database
     .prepare(`
       SELECT name
       FROM sqlite_schema
-      WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'trigger', 'view')
+      WHERE name NOT GLOB 'sqlite_*' AND type IN ('table', 'index', 'trigger', 'view')
     `)
     .all();
   if (version === 0 && userObjects.length === 0) return "initialize";
@@ -258,7 +304,7 @@ function assertVersionOneSchema(database: Database.Database): void {
   const rows = database
     .prepare(`
       SELECT name, sql FROM sqlite_schema
-      WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'trigger', 'view')
+      WHERE name NOT GLOB 'sqlite_*' AND type IN ('table', 'index', 'trigger', 'view')
       ORDER BY type, name
     `)
     .all() as Array<{ name: string; sql?: string }>;
@@ -269,7 +315,9 @@ function assertVersionOneSchema(database: Database.Database): void {
     const expected = expectedSqlByName.get(row.name);
     if (
       expected === undefined ||
-      normalizeSchemaSql(row.sql) !== normalizeSchemaSql(expected)
+      normalizeSchemaSql(row.sql) !== normalizeSchemaSql(expected) ||
+      normalizeSchemaSqlPreservingLiterals(row.sql) !==
+        normalizeSchemaSqlPreservingLiterals(expected)
     ) {
       throw persistenceError("UNSUPPORTED_SCHEMA_VERSION");
     }

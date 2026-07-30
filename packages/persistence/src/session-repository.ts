@@ -16,19 +16,7 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const KNOWN_KEY_FRAGMENT =
   /(?:sk-|sk_|pk_|rk_|ghp_)[A-Za-z0-9_-]{12,}/iu;
 
-type SessionRow = Readonly<{
-  id: string;
-  task_kind: TaskKind;
-  state: SessionState;
-  round: number;
-  workspace_id: string;
-  provider_id: string;
-  verification_command_id: string;
-  created_at: string;
-  updated_at: string;
-}>;
-
-function assertIdentifier(value: string): void {
+function assertIdentifier(value: unknown): asserts value is string {
   if (
     typeof value !== "string" ||
     !IDENTIFIER.test(value) ||
@@ -36,6 +24,22 @@ function assertIdentifier(value: string): void {
   ) {
     throw persistenceError("INVALID_PERSISTENCE_INPUT");
   }
+}
+
+function isTaskKind(value: unknown): value is TaskKind {
+  return value === "test_repair" || value === "feature_implementation";
+}
+
+function isSessionState(value: unknown): value is SessionState {
+  return (
+    value === "created" ||
+    value === "running" ||
+    value === "awaiting_approval" ||
+    value === "completed" ||
+    value === "blocked" ||
+    value === "failed" ||
+    value === "stopped"
+  );
 }
 
 function canonicalIso(value: string): string | undefined {
@@ -81,29 +85,52 @@ function validatedCreateSessionInput(
   }
 }
 
-function duplicateSessionConstraint(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) {
-    return false;
+function mapSessionRow(value: unknown, expectedId: string): PersistedSession {
+  if (typeof value !== "object" || value === null) {
+    throw persistenceError("PERSISTENCE_FAILED");
   }
-  try {
-    const codeDescriptor = Object.getOwnPropertyDescriptor(error, "code");
-    const messageDescriptor = Object.getOwnPropertyDescriptor(error, "message");
-    if (
-      codeDescriptor === undefined ||
-      !("value" in codeDescriptor) ||
-      messageDescriptor === undefined ||
-      !("value" in messageDescriptor)
-    ) {
-      return false;
-    }
-    return (
-      (codeDescriptor.value === "SQLITE_CONSTRAINT_PRIMARYKEY" ||
-        codeDescriptor.value === "SQLITE_CONSTRAINT_UNIQUE") &&
-      messageDescriptor.value === "UNIQUE constraint failed: sessions.id"
-    );
-  } catch {
-    return false;
+  const row = value as Readonly<Record<string, unknown>>;
+  const id = row.id;
+  const taskKind = row.task_kind;
+  const state = row.state;
+  const round = row.round;
+  const workspaceId = row.workspace_id;
+  const providerId = row.provider_id;
+  const verificationCommandId = row.verification_command_id;
+  const createdAt = row.created_at;
+  const updatedAt = row.updated_at;
+
+  assertIdentifier(id);
+  assertIdentifier(workspaceId);
+  assertIdentifier(providerId);
+  assertIdentifier(verificationCommandId);
+  if (
+    id !== expectedId ||
+    !isTaskKind(taskKind) ||
+    !isSessionState(state) ||
+    typeof round !== "number" ||
+    !Number.isInteger(round) ||
+    round < 0 ||
+    round > 3 ||
+    typeof createdAt !== "string" ||
+    canonicalIso(createdAt) === undefined ||
+    typeof updatedAt !== "string" ||
+    canonicalIso(updatedAt) === undefined
+  ) {
+    throw persistenceError("PERSISTENCE_FAILED");
   }
+
+  return Object.freeze({
+    id,
+    taskKind,
+    state,
+    round,
+    workspaceId,
+    providerId,
+    verificationCommandId,
+    createdAt,
+    updatedAt,
+  });
 }
 
 function closeBestEffort(database: ReturnType<typeof openSessionDatabase>): void {
@@ -139,6 +166,7 @@ export function createSessionRepository(databasePath: string): SessionRepository
         @createdAt,
         @updatedAt
       )
+      ON CONFLICT(id) DO NOTHING
     `);
     const selectSession = database.prepare(`
       SELECT
@@ -167,8 +195,9 @@ export function createSessionRepository(databasePath: string): SessionRepository
     ): Promise<void> {
       assertOpen();
       const validated = validatedCreateSessionInput(input);
+      let changes: number;
       try {
-        insertSession.run({
+        changes = insertSession.run({
           id: validated.id,
           taskKind: validated.taskKind,
           state: validated.state,
@@ -178,11 +207,14 @@ export function createSessionRepository(databasePath: string): SessionRepository
           verificationCommandId: validated.verificationCommandId,
           createdAt: validated.createdAt,
           updatedAt: validated.createdAt,
-        });
-      } catch (error) {
-        if (duplicateSessionConstraint(error)) {
-          throw persistenceError("DUPLICATE_RECORD");
-        }
+        }).changes;
+      } catch {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+      if (changes === 0) {
+        throw persistenceError("DUPLICATE_RECORD");
+      }
+      if (changes !== 1) {
         throw persistenceError("PERSISTENCE_FAILED");
       }
     }
@@ -193,21 +225,11 @@ export function createSessionRepository(databasePath: string): SessionRepository
       assertOpen();
       assertIdentifier(sessionId);
       try {
-        const row = selectSession.get(sessionId) as SessionRow | undefined;
+        const row = selectSession.get(sessionId);
         if (row === undefined) {
           return undefined;
         }
-        return Object.freeze({
-          id: row.id,
-          taskKind: row.task_kind,
-          state: row.state,
-          round: row.round,
-          workspaceId: row.workspace_id,
-          providerId: row.provider_id,
-          verificationCommandId: row.verification_command_id,
-          createdAt: row.created_at,
-          updatedAt: row.updated_at,
-        });
+        return mapSessionRow(row, sessionId);
       } catch {
         throw persistenceError("PERSISTENCE_FAILED");
       }
