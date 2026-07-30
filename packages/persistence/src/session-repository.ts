@@ -1540,6 +1540,12 @@ function closeBestEffort(database: ReturnType<typeof openSessionDatabase>): void
 export function createSessionRepository(databasePath: string): SessionRepository {
   const database = openSessionDatabase(databasePath);
   try {
+    const selectSchemaFingerprint = database.prepare(`
+      SELECT type, name, tbl_name, rootpage, sql
+      FROM sqlite_schema
+      ORDER BY type ASC, name ASC
+    `);
+    const expectedSchemaFingerprint = selectSchemaFingerprint.all();
     const insertSession = database.prepare(`
       INSERT INTO sessions (
         id,
@@ -1637,6 +1643,41 @@ export function createSessionRepository(databasePath: string): SessionRepository
       SELECT action_id
       FROM action_records
       WHERE action_id = ?
+    `);
+    const selectRecoveryActionById = database.prepare(`
+      SELECT
+        action_records.action_id,
+        action_records.session_id,
+        action_records.round,
+        action_records.action_kind,
+        action_records.input_summary,
+        action_records.policy_decision,
+        action_records.result_summary,
+        timeline_events.session_id AS event_session_id,
+        timeline_events.round AS event_round,
+        timeline_events.kind AS event_kind,
+        timeline_events.action_id AS event_action_id,
+        timeline_events.action_kind AS event_action_kind
+      FROM action_records
+      INNER JOIN timeline_events
+        ON timeline_events.event_id = action_records.event_id
+      WHERE action_records.action_id = ?
+    `);
+    const selectRecoveryApprovalOrigins = database.prepare(`
+      SELECT
+        session_id,
+        round,
+        kind,
+        approval_id,
+        approval_action_id,
+        patch_hash,
+        base_hash,
+        approval_status,
+        approval_created_at,
+        approval_expires_at
+      FROM timeline_events
+      WHERE approval_id = ?
+      ORDER BY event_id
     `);
     const selectActionForRound = database.prepare(`
       SELECT
@@ -2027,6 +2068,87 @@ export function createSessionRepository(databasePath: string): SessionRepository
       }
       return true;
     }
+
+    function assertLifecycleSchemaIntegrity(): void {
+      let actual: readonly unknown[];
+      try {
+        actual = selectSchemaFingerprint.all();
+      } catch {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+      if (!storedRowsEqual(actual, expectedSchemaFingerprint)) {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+    }
+
+    function assertRecoveryApprovalBinding(
+      session: PersistedSession,
+      approval: ApprovalRecord,
+    ): void {
+      try {
+        const row = selectRecoveryActionById.get(approval.actionId);
+        if (typeof row !== "object" || row === null) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const stored = row as Readonly<Record<string, unknown>>;
+        const actionRound = stored.round;
+        if (
+          typeof actionRound !== "number" ||
+          !Number.isInteger(actionRound) ||
+          actionRound < 1 ||
+          actionRound > session.round
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const action = mapActionRecordRow(
+          row,
+          session.id,
+          actionRound,
+        );
+        if (
+          action.actionId !== approval.actionId ||
+          action.actionKind !== "propose_patch" ||
+          action.policyDecision !== "ask" ||
+          stored.event_session_id !== session.id ||
+          stored.event_round !== actionRound ||
+          stored.event_kind !== "action" ||
+          stored.event_action_id !== approval.actionId ||
+          stored.event_action_kind !== "propose_patch"
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const origins = selectRecoveryApprovalOrigins.all(
+          approval.approvalId,
+        );
+        if (origins.length !== 1) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const origin = origins[0];
+        if (typeof origin !== "object" || origin === null) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const storedOrigin = origin as Readonly<
+          Record<string, unknown>
+        >;
+        if (
+          storedOrigin.session_id !== session.id ||
+          storedOrigin.round !== actionRound ||
+          storedOrigin.kind !== "approval" ||
+          storedOrigin.approval_id !== approval.approvalId ||
+          storedOrigin.approval_action_id !== approval.actionId ||
+          storedOrigin.patch_hash !== approval.patchHash ||
+          storedOrigin.base_hash !== approval.baseHash ||
+          storedOrigin.approval_status !== "pending" ||
+          storedOrigin.approval_created_at !== approval.createdAt ||
+          storedOrigin.approval_expires_at !== approval.expiresAt
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+      } catch {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+    }
+
     const createSessionTransaction = database.transaction(
       (
         input: CreatePersistedSessionInput,
@@ -2641,6 +2763,7 @@ export function createSessionRepository(databasePath: string): SessionRepository
     );
     const clearSessionTransaction = database.transaction(
       (sessionId: string): void => {
+        assertLifecycleSchemaIntegrity();
         const changes = deleteSession.run(sessionId).changes;
         if (changes !== 0 && changes !== 1) {
           throw persistenceError("PERSISTENCE_FAILED");
@@ -2671,6 +2794,7 @@ export function createSessionRepository(databasePath: string): SessionRepository
     );
     const recoverInterruptedSessionsTransaction = database.transaction(
       (now: RecoveryTime): number => {
+        assertLifecycleSchemaIntegrity();
         const candidates = selectInterruptedSessions.all().map((row) => {
           if (typeof row !== "object" || row === null) {
             throw persistenceError("PERSISTENCE_FAILED");
@@ -2696,7 +2820,7 @@ export function createSessionRepository(databasePath: string): SessionRepository
           }
         }
 
-        for (const session of candidates) {
+        const recoveryEntries = candidates.map((session) => {
           const approvals = selectPendingApprovalsForSession
             .all(session.id)
             .map((row) => mapApprovalRecordRow(row));
@@ -2707,6 +2831,16 @@ export function createSessionRepository(databasePath: string): SessionRepository
             ) {
               throw persistenceError("PERSISTENCE_FAILED");
             }
+            assertRecoveryApprovalBinding(session, approval);
+          }
+          return Object.freeze({
+            session,
+            approvals: Object.freeze(approvals),
+          });
+        });
+
+        for (const { session, approvals } of recoveryEntries) {
+          for (const approval of approvals) {
             const event = validateAndRedactEvent({
               sessionId: session.id,
               round: session.round,

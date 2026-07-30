@@ -622,6 +622,41 @@ describe("session lifecycle persistence", () => {
     });
   });
 
+  it("rolls back clear when a trigger silently deletes another session", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRichSession(repository, "session-clear", "clear");
+      await createRichSession(repository, "session-keep", "keep");
+      const before = encodedBusinessSnapshot(databasePath);
+      inspectDatabase(databasePath, (database) => {
+        database.exec(`
+          CREATE TRIGGER silently_delete_survivor
+          BEFORE DELETE ON sessions
+          WHEN OLD.id = 'session-clear'
+          BEGIN
+            DELETE FROM sessions WHERE id = 'session-keep';
+          END
+        `);
+      });
+
+      await expectRejected(
+        repository.clearSession("session-clear"),
+        "PERSISTENCE_FAILED",
+      );
+
+      expect(encodedBusinessSnapshot(databasePath)).toBe(before);
+      expect(
+        Object.values(sessionRowCounts(databasePath, "session-clear")).every(
+          (count) => count > 0,
+        ),
+      ).toBe(true);
+      expect(
+        Object.values(sessionRowCounts(databasePath, "session-keep")).every(
+          (count) => count > 0,
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("stops created, running, and awaiting sessions while leaving all four terminal states unchanged", async () => {
     await withFileRepository(async (repository, databasePath) => {
       await repository.createSession(validSession("created-session"));
@@ -856,6 +891,109 @@ describe("session lifecycle persistence", () => {
           },
         },
       ]);
+    });
+  });
+
+  it("rejects a pending approval whose normalized action belongs to another session", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository, "session-action-owner");
+      await appendPendingApproval(repository, {
+        sessionId: "session-action-owner",
+        round: 1,
+        actionId: "action-owned",
+        approvalId: "approval-corrupt",
+        startSecond: 1,
+      });
+      await repository.createSession(validSession("session-wrong-owner"));
+      inspectDatabase(databasePath, (database) => {
+        database.pragma("foreign_keys = ON");
+        expect(
+          database
+            .prepare(
+              "UPDATE approvals SET session_id = ? WHERE id = ?",
+            )
+            .run("session-wrong-owner", "approval-corrupt").changes,
+        ).toBe(1);
+      });
+      const before = encodedBusinessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.recoverInterruptedSessions(Date.parse(at(20))),
+        "PERSISTENCE_FAILED",
+      );
+
+      expect(encodedBusinessSnapshot(databasePath)).toBe(before);
+      expect(
+        inspectDatabase(databasePath, (database) =>
+          database
+            .prepare(
+              "SELECT session_id, action_id, status FROM approvals WHERE id = ?",
+            )
+            .get("approval-corrupt"),
+        ),
+      ).toEqual({
+        session_id: "session-wrong-owner",
+        action_id: "action-owned",
+        status: "pending",
+      });
+    });
+  });
+
+  it("rejects a pending approval rebound to another legal action in the same session", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository, "session-rebound");
+      await appendPendingApproval(repository, {
+        sessionId: "session-rebound",
+        round: 1,
+        actionId: "action-original",
+        approvalId: "approval-rebound",
+        startSecond: 1,
+      });
+      await repository.append(
+        stateEvent("session-rebound", 1, at(5), "running"),
+      );
+      await repository.append(
+        actionEvent(
+          "session-rebound",
+          2,
+          at(6),
+          "action-replacement",
+        ),
+      );
+      await repository.append(
+        policyEvent("session-rebound", 2, at(7), "ask"),
+      );
+      inspectDatabase(databasePath, (database) => {
+        database.pragma("foreign_keys = ON");
+        expect(
+          database
+            .prepare(
+              "UPDATE approvals SET action_id = ? WHERE id = ?",
+            )
+            .run("action-replacement", "approval-rebound").changes,
+        ).toBe(1);
+      });
+      const before = encodedBusinessSnapshot(databasePath);
+
+      await expectRejected(
+        repository.recoverInterruptedSessions(Date.parse(at(20))),
+        "PERSISTENCE_FAILED",
+      );
+
+      expect(encodedBusinessSnapshot(databasePath)).toBe(before);
+      expect(
+        inspectDatabase(databasePath, (database) =>
+          database
+            .prepare(
+              "SELECT session_id, action_id, status FROM approvals WHERE id = ?",
+            )
+            .get("approval-rebound"),
+        ),
+      ).toEqual({
+        session_id: "session-rebound",
+        action_id: "action-replacement",
+        status: "pending",
+      });
     });
   });
 
@@ -1102,6 +1240,46 @@ describe("session lifecycle persistence", () => {
       await expect(repository.loadSession("session-b")).resolves.toMatchObject({
         state: "awaiting_approval",
       });
+    });
+  });
+
+  it("rolls back recovery when a trigger silently mutates a terminal session", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await repository.createSession(validSession("session-candidate"));
+      await createRichSession(repository, "session-terminal", "terminal");
+      await repository.append(
+        stateEvent("session-terminal", 1, at(8), "completed"),
+      );
+      const before = encodedBusinessSnapshot(databasePath);
+      const terminalBefore = encodedSessionSnapshot(
+        databasePath,
+        "session-terminal",
+      );
+      inspectDatabase(databasePath, (database) => {
+        database.exec(`
+          CREATE TRIGGER silently_mutate_terminal
+          AFTER INSERT ON timeline_events
+          WHEN NEW.summary = 'SESSION_INTERRUPTED'
+          BEGIN
+            UPDATE sessions
+            SET workspace_id = 'silently-mutated'
+            WHERE id = 'session-terminal';
+          END
+        `);
+      });
+
+      await expectRejected(
+        repository.recoverInterruptedSessions(Date.parse(at(20))),
+        "PERSISTENCE_FAILED",
+      );
+
+      expect(encodedBusinessSnapshot(databasePath)).toBe(before);
+      expect(
+        encodedSessionSnapshot(databasePath, "session-terminal"),
+      ).toBe(terminalBefore);
+      await expect(
+        repository.loadSession("session-candidate"),
+      ).resolves.toMatchObject({ state: "created", updatedAt: at(0) });
     });
   });
 });
