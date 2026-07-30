@@ -210,6 +210,58 @@ const SCHEMA_SQL = [
 
 type BootstrapState = "initialize" | "validate";
 
+type InternalSchemaObject = Readonly<{
+  type: "index" | "table";
+  tableName: string;
+  sql: string | null;
+}>;
+
+const EXPECTED_INTERNAL_SCHEMA_OBJECTS: ReadonlyMap<
+  string,
+  InternalSchemaObject
+> = new Map([
+  [
+    "sqlite_sequence",
+    {
+      type: "table",
+      tableName: "sqlite_sequence",
+      sql: "CREATE TABLE sqlite_sequence(name,seq)",
+    },
+  ],
+  [
+    "sqlite_autoindex_sessions_1",
+    { type: "index", tableName: "sessions", sql: null },
+  ],
+  [
+    "sqlite_autoindex_action_records_1",
+    { type: "index", tableName: "action_records", sql: null },
+  ],
+  [
+    "sqlite_autoindex_action_records_2",
+    { type: "index", tableName: "action_records", sql: null },
+  ],
+  [
+    "sqlite_autoindex_action_records_3",
+    { type: "index", tableName: "action_records", sql: null },
+  ],
+  [
+    "sqlite_autoindex_approvals_1",
+    { type: "index", tableName: "approvals", sql: null },
+  ],
+  [
+    "sqlite_autoindex_approvals_2",
+    { type: "index", tableName: "approvals", sql: null },
+  ],
+  [
+    "sqlite_autoindex_verification_runs_1",
+    { type: "index", tableName: "verification_runs", sql: null },
+  ],
+  [
+    "sqlite_autoindex_session_memory_1",
+    { type: "index", tableName: "session_memory", sql: null },
+  ],
+]);
+
 function normalizeSchemaSql(value: string | undefined): string {
   return (value ?? "")
     .replace(/\s+/gu, " ")
@@ -266,14 +318,14 @@ function normalizeSchemaSqlPreservingLiterals(
 
 function readBootstrapState(database: Database.Database): BootstrapState {
   const version = Number(database.pragma("user_version", { simple: true }));
-  const userObjects = database
+  const schemaObjects = database
     .prepare(`
       SELECT name
       FROM sqlite_schema
-      WHERE name NOT GLOB 'sqlite_*' AND type IN ('table', 'index', 'trigger', 'view')
+      WHERE type IN ('table', 'index', 'trigger', 'view')
     `)
     .all();
-  if (version === 0 && userObjects.length === 0) return "initialize";
+  if (version === 0 && schemaObjects.length === 0) return "initialize";
   if (version === PERSISTENCE_SCHEMA_VERSION) return "validate";
   throw persistenceError("UNSUPPORTED_SCHEMA_VERSION");
 }
@@ -303,21 +355,47 @@ function assertVersionOneSchema(database: Database.Database): void {
   ]);
   const rows = database
     .prepare(`
-      SELECT name, sql FROM sqlite_schema
-      WHERE name NOT GLOB 'sqlite_*' AND type IN ('table', 'index', 'trigger', 'view')
+      SELECT name, type, tbl_name, sql FROM sqlite_schema
+      WHERE type IN ('table', 'index', 'trigger', 'view')
       ORDER BY type, name
     `)
-    .all() as Array<{ name: string; sql?: string }>;
-  if (rows.length !== expectedSqlByName.size) {
+    .all() as Array<{
+      name: string;
+      type: string;
+      tbl_name: string;
+      sql: string | null;
+    }>;
+  const userRows = rows.filter(
+    ({ name }) => !name.toLowerCase().startsWith("sqlite_"),
+  );
+  const internalRows = rows.filter(({ name }) =>
+    name.toLowerCase().startsWith("sqlite_"),
+  );
+  if (
+    userRows.length !== expectedSqlByName.size ||
+    internalRows.length !== EXPECTED_INTERNAL_SCHEMA_OBJECTS.size
+  ) {
     throw persistenceError("UNSUPPORTED_SCHEMA_VERSION");
   }
-  for (const row of rows) {
+  for (const row of userRows) {
     const expected = expectedSqlByName.get(row.name);
     if (
       expected === undefined ||
-      normalizeSchemaSql(row.sql) !== normalizeSchemaSql(expected) ||
-      normalizeSchemaSqlPreservingLiterals(row.sql) !==
+      normalizeSchemaSql(row.sql ?? undefined) !==
+        normalizeSchemaSql(expected) ||
+      normalizeSchemaSqlPreservingLiterals(row.sql ?? undefined) !==
         normalizeSchemaSqlPreservingLiterals(expected)
+    ) {
+      throw persistenceError("UNSUPPORTED_SCHEMA_VERSION");
+    }
+  }
+  for (const row of internalRows) {
+    const expected = EXPECTED_INTERNAL_SCHEMA_OBJECTS.get(row.name);
+    if (
+      expected === undefined ||
+      row.type !== expected.type ||
+      row.tbl_name !== expected.tableName ||
+      row.sql !== expected.sql
     ) {
       throw persistenceError("UNSUPPORTED_SCHEMA_VERSION");
     }

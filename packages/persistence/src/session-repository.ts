@@ -16,7 +16,7 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const KNOWN_KEY_FRAGMENT =
   /(?:sk-|sk_|pk_|rk_|ghp_)[A-Za-z0-9_-]{12,}/iu;
 
-type CreateSessionTransactionResult = "inserted" | "duplicate" | "failed";
+type CreateSessionTransactionResult = "inserted" | "duplicate";
 
 function assertIdentifier(value: unknown): asserts value is string {
   if (
@@ -101,6 +101,18 @@ function mapSessionRow(value: unknown, expectedId: string): PersistedSession {
   const verificationCommandId = row.verification_command_id;
   const createdAt = row.created_at;
   const updatedAt = row.updated_at;
+  const canonicalCreatedAt =
+    typeof createdAt === "string" ? canonicalIso(createdAt) : undefined;
+  const canonicalUpdatedAt =
+    typeof updatedAt === "string" ? canonicalIso(updatedAt) : undefined;
+  const createdTimestamp =
+    canonicalCreatedAt === undefined
+      ? undefined
+      : Date.parse(canonicalCreatedAt);
+  const updatedTimestamp =
+    canonicalUpdatedAt === undefined
+      ? undefined
+      : Date.parse(canonicalUpdatedAt);
 
   assertIdentifier(id);
   assertIdentifier(workspaceId);
@@ -115,9 +127,12 @@ function mapSessionRow(value: unknown, expectedId: string): PersistedSession {
     round < 0 ||
     round > 3 ||
     typeof createdAt !== "string" ||
-    canonicalIso(createdAt) === undefined ||
+    createdTimestamp === undefined ||
     typeof updatedAt !== "string" ||
-    canonicalIso(updatedAt) === undefined
+    updatedTimestamp === undefined ||
+    updatedTimestamp < createdTimestamp ||
+    (state === "created" && round !== 0) ||
+    (state === "awaiting_approval" && round === 0)
   ) {
     throw persistenceError("PERSISTENCE_FAILED");
   }
@@ -207,7 +222,27 @@ export function createSessionRepository(databasePath: string): SessionRepository
           createdAt: input.createdAt,
           updatedAt: input.createdAt,
         }).changes;
-        return changes === 1 ? "inserted" : "failed";
+        if (changes !== 1) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const persisted = mapSessionRow(
+          selectSession.get(input.id),
+          input.id,
+        );
+        if (
+          persisted.id !== input.id ||
+          persisted.taskKind !== input.taskKind ||
+          persisted.state !== input.state ||
+          persisted.round !== input.round ||
+          persisted.workspaceId !== input.workspaceId ||
+          persisted.providerId !== input.providerId ||
+          persisted.verificationCommandId !== input.verificationCommandId ||
+          persisted.createdAt !== input.createdAt ||
+          persisted.updatedAt !== input.createdAt
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        return "inserted";
       },
     );
     let closed = false;

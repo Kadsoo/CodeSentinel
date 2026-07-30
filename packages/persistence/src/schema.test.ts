@@ -119,6 +119,39 @@ function rewriteSchemaSql(
   }
 }
 
+function hideCatalogObject(
+  database: Database.Database,
+  sourceName: string,
+  hiddenName: string,
+): void {
+  database.unsafeMode(true);
+  try {
+    database.pragma("writable_schema = ON");
+    const row = database
+      .prepare("SELECT tbl_name, sql FROM sqlite_schema WHERE name = ?")
+      .get(sourceName) as { tbl_name: string; sql: string | null } | undefined;
+    expect(row).toBeDefined();
+    const hiddenTableName =
+      row?.tbl_name === sourceName ? hiddenName : (row?.tbl_name ?? "");
+    const hiddenSql = row?.sql?.replace(sourceName, hiddenName) ?? null;
+    expect(hiddenSql).not.toBe(row?.sql);
+    database
+      .prepare(`
+        UPDATE sqlite_schema
+        SET name = ?, tbl_name = ?, sql = ?
+        WHERE name = ?
+      `)
+      .run(hiddenName, hiddenTableName, hiddenSql, sourceName);
+    const schemaVersion = Number(
+      database.pragma("schema_version", { simple: true }),
+    );
+    database.pragma(`schema_version = ${schemaVersion + 1}`);
+  } finally {
+    database.pragma("writable_schema = OFF");
+    database.unsafeMode(false);
+  }
+}
+
 function stateEvent(): HarnessEvent {
   return {
     sessionId: "session-1",
@@ -319,6 +352,20 @@ describe("persistence schema bootstrap", () => {
     });
   });
 
+  it("rejects a version-zero catalog containing a hidden sqlite_ table", async () => {
+    await withDatabasePath((databasePath) => {
+      const seed = new Database(databasePath);
+      try {
+        seed.exec("CREATE TABLE evil_table (id TEXT);");
+        hideCatalogObject(seed, "evil_table", "sqlite_evil");
+      } finally {
+        seed.close();
+      }
+
+      expectOpenFailure(databasePath, "UNSUPPORTED_SCHEMA_VERSION");
+    });
+  });
+
   it("rejects a version-two database", async () => {
     await withDatabasePath((databasePath) => {
       const seed = new Database(databasePath);
@@ -459,6 +506,33 @@ describe("persistence schema bootstrap", () => {
     });
   });
 
+  it.each([
+    [
+      "table",
+      "CREATE TABLE evil_table (id TEXT)",
+      "evil_table",
+      "sqlite_evil",
+    ],
+    [
+      "trigger",
+      "CREATE TRIGGER evil_trigger AFTER INSERT ON sessions BEGIN SELECT 1; END",
+      "evil_trigger",
+      "sqlite_evil_trigger",
+    ],
+  ])(
+    "rejects a hidden extra sqlite_ %s in a version-one catalog",
+    async (_kind, statement, sourceName, hiddenName) => {
+      await withDatabasePath((databasePath) => {
+        initializeAndMutateSchema(databasePath, (database) => {
+          database.exec(statement);
+          hideCatalogObject(database, sourceName, hiddenName);
+        });
+
+        expectOpenFailure(databasePath, "UNSUPPORTED_SCHEMA_VERSION");
+      });
+    },
+  );
+
   it("maps a native open failure to a fixed error without leaking its sentinel or path", async () => {
     await withDatabasePath(async (databasePath) => {
       const sentinel = "sk-proj-native-error-sentinel-1234";
@@ -524,17 +598,19 @@ describe("session repository initialization", () => {
     }
   });
 
-  it("returns PERSISTENCE_FAILED when a new-ID insert reports zero changes", async () => {
+  it("rolls back BEFORE-trigger side effects when a new-ID insert is ignored", async () => {
     await withDatabasePath(async (databasePath) => {
       const repository = createSessionRepository(databasePath);
       try {
         const external = new Database(databasePath);
         try {
           external.exec(`
+            CREATE TABLE external_side_effects (marker TEXT NOT NULL);
             CREATE TRIGGER external_ignore_session
             BEFORE INSERT ON sessions
             WHEN NEW.id = 'session-ignored'
             BEGIN
+              INSERT INTO external_side_effects(marker) VALUES ('before-ignore');
               SELECT RAISE(IGNORE);
             END;
           `);
@@ -551,6 +627,64 @@ describe("session repository initialization", () => {
         ).rejects.toMatchObject({
           code: "PERSISTENCE_FAILED",
         });
+
+        const inspection = new Database(databasePath);
+        try {
+          const sideEffects = inspection
+            .prepare("SELECT COUNT(*) AS count FROM external_side_effects")
+            .get() as { count: number };
+          expect(sideEffects.count).toBe(0);
+        } finally {
+          inspection.close();
+        }
+      } finally {
+        repository.close();
+      }
+    });
+  });
+
+  it("rolls back an AFTER-trigger deletion and its side effects", async () => {
+    await withDatabasePath(async (databasePath) => {
+      const repository = createSessionRepository(databasePath);
+      try {
+        const external = new Database(databasePath);
+        try {
+          external.exec(`
+            CREATE TABLE external_side_effects (marker TEXT NOT NULL);
+            CREATE TRIGGER external_delete_session
+            AFTER INSERT ON sessions
+            WHEN NEW.id = 'session-deleted'
+            BEGIN
+              INSERT INTO external_side_effects(marker) VALUES ('after-delete');
+              DELETE FROM sessions WHERE id = NEW.id;
+            END;
+          `);
+        } finally {
+          external.close();
+        }
+
+        await expect(
+          repository.createSession(
+            validSession({
+              id: "session-deleted",
+            }),
+          ),
+        ).rejects.toMatchObject({
+          code: "PERSISTENCE_FAILED",
+        });
+        await expect(
+          repository.loadSession("session-deleted"),
+        ).resolves.toBeUndefined();
+
+        const inspection = new Database(databasePath);
+        try {
+          const sideEffects = inspection
+            .prepare("SELECT COUNT(*) AS count FROM external_side_effects")
+            .get() as { count: number };
+          expect(sideEffects.count).toBe(0);
+        } finally {
+          inspection.close();
+        }
       } finally {
         repository.close();
       }
@@ -704,6 +838,12 @@ describe("session repository initialization", () => {
       "sk-proj-corrupt-updated-at-1234",
       "sk-proj-corrupt-updated-at-1234",
     ],
+    [
+      "updated timestamp earlier than created",
+      "updated_at",
+      "2026-07-29T23:59:59.999Z",
+      undefined,
+    ],
   ])(
     "returns fixed PERSISTENCE_FAILED for a corrupt stored %s",
     async (_label, column, corruptValue, sentinel) => {
@@ -747,6 +887,61 @@ describe("session repository initialization", () => {
       });
     },
   );
+
+  it.each([
+    ["created", 1],
+    ["awaiting_approval", 0],
+  ])(
+    "returns fixed PERSISTENCE_FAILED for stored state %s at round %i",
+    async (state, round) => {
+      await withDatabasePath(async (databasePath) => {
+        const repository = createSessionRepository(databasePath);
+        try {
+          await repository.createSession(validSession());
+          const external = new Database(databasePath);
+          try {
+            external
+              .prepare("UPDATE sessions SET state = ?, round = ? WHERE id = ?")
+              .run(state, round, "session-1");
+          } finally {
+            external.close();
+          }
+
+          await expect(repository.loadSession("session-1")).rejects.toMatchObject({
+            code: "PERSISTENCE_FAILED",
+          });
+        } finally {
+          repository.close();
+        }
+      });
+    },
+  );
+
+  it("accepts a stored running session at round three", async () => {
+    await withDatabasePath(async (databasePath) => {
+      const repository = createSessionRepository(databasePath);
+      try {
+        await repository.createSession(validSession());
+        const external = new Database(databasePath);
+        try {
+          external
+            .prepare("UPDATE sessions SET state = 'running', round = 3 WHERE id = ?")
+            .run("session-1");
+        } finally {
+          external.close();
+        }
+
+        const persisted = await repository.loadSession("session-1");
+        expect(persisted).toMatchObject({
+          state: "running",
+          round: 3,
+        });
+        expect(Object.isFrozen(persisted)).toBe(true);
+      } finally {
+        repository.close();
+      }
+    });
+  });
 
   it("allows close to be called twice", () => {
     const repository = createSessionRepository(":memory:");
