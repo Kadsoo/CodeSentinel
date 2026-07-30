@@ -1249,7 +1249,8 @@ export function createSessionRepository(databasePath: string): SessionRepository
         }
         if (
           (session.state === "running" &&
-            (action.actionKind !== "run_verification" ||
+            (session.taskKind !== "test_repair" ||
+              action.actionKind !== "run_verification" ||
               action.policyDecision !== "allow")) ||
           (session.state === "awaiting_approval" &&
             (action.actionKind !== "propose_patch" ||

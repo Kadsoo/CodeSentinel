@@ -687,6 +687,39 @@ describe("session event persistence", () => {
     });
   });
 
+  it("rejects applied-patch result when the approved approval names another action", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createAwaitingApprovalSession(repository);
+      await repository.append(
+        approvalEvent(1, at(4), {
+          actionId: "another-action",
+          status: "approved",
+        }),
+      );
+      const timelineBefore = await repository.loadTimeline(SESSION_ID);
+
+      await expectRejected(
+        repository.append(
+          toolEvent(1, at(5), "apply_approved_patch"),
+        ),
+        "INVALID_EVENT_SEQUENCE",
+      );
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual(
+        timelineBefore,
+      );
+      const action = inspectDatabase(databasePath, (database) =>
+        database
+          .prepare(`
+            SELECT result_summary
+            FROM action_records
+            WHERE action_id = ?
+          `)
+          .get(ACTION_ID),
+      );
+      expect(action).toEqual({ result_summary: null });
+    });
+  });
+
   const allowedTransitions: Readonly<
     Record<
       "created" | "running" | "awaiting_approval",
@@ -843,6 +876,29 @@ describe("session event persistence", () => {
         round: 1,
         updatedAt: at(6),
       });
+    });
+  });
+
+  it("rejects later verification from a feature-implementation run-verification action", async () => {
+    await withRepository(async (repository) => {
+      await createRunningSession(repository, {
+        taskKind: "feature_implementation",
+      });
+      await repository.append(
+        actionEvent(1, at(1), "run_verification", ACTION_ID),
+      );
+      await repository.append(policyEvent(1, at(2), "allow"));
+      const timelineBefore = await repository.loadTimeline(SESSION_ID);
+      const sessionBefore = await repository.loadSession(SESSION_ID);
+
+      await expectRejected(
+        repository.append(verificationEvent(1, at(3))),
+        "INVALID_EVENT_SEQUENCE",
+      );
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual(
+        timelineBefore,
+      );
+      expect(await repository.loadSession(SESSION_ID)).toEqual(sessionBefore);
     });
   });
 
