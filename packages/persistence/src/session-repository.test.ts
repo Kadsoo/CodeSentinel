@@ -14,11 +14,13 @@ import {
   type CreatePersistedSessionInput,
   type SessionRepository,
 } from "./index.js";
+import { PendingPatchStore } from "../../core/src/pending-patch-store.js";
 
 const SESSION_ID = "session-1";
 const ACTION_ID = "action-1";
 const HASH = "a".repeat(64);
 const SENTINEL = "must-not-leak-sentinel";
+const MIN_DATE_TIMESTAMP = -8_640_000_000_000_000;
 
 type ErrorCode =
   | "INVALID_PERSISTENCE_INPUT"
@@ -836,6 +838,73 @@ describe("session event persistence", () => {
         status: "pending",
         created_at: 100,
         expires_at: 200,
+      });
+    });
+  });
+
+  it("persists negative approval timestamps produced by PendingPatchStore", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      const registration = new PendingPatchStore().create({
+        sessionId: SESSION_ID,
+        action: {
+          kind: "propose_patch",
+          path: "src/example.ts",
+          baseHash: HASH,
+          patch: "patch",
+          reason: "repair",
+          stage: "test",
+        },
+        actionId: ACTION_ID,
+        approvalId: "approval-1",
+        now: -1_000,
+      });
+      await createAwaitingApprovalSession(repository);
+
+      await repository.append(
+        approvalEvent(1, at(4), {
+          approvalId: registration.approval.id,
+          actionId: registration.approval.actionId,
+          patchHash: registration.approval.patchHash,
+          baseHash: registration.approval.baseHash,
+          status: registration.approval.status,
+          createdAt: registration.approval.createdAt,
+          expiresAt: registration.approval.expiresAt,
+        }),
+      );
+
+      expect(
+        inspectDatabase(databasePath, (database) =>
+          database
+            .prepare("SELECT created_at, expires_at FROM approvals")
+            .get(),
+        ),
+      ).toEqual({
+        created_at: registration.approval.createdAt,
+        expires_at: registration.approval.expiresAt,
+      });
+    });
+  });
+
+  it("accepts the Date millisecond lower bound for approval metadata", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createAwaitingApprovalSession(repository);
+
+      await repository.append(
+        approvalEvent(1, at(4), {
+          createdAt: MIN_DATE_TIMESTAMP,
+          expiresAt: MIN_DATE_TIMESTAMP + 1,
+        }),
+      );
+
+      expect(
+        inspectDatabase(databasePath, (database) =>
+          database
+            .prepare("SELECT created_at, expires_at FROM approvals")
+            .get(),
+        ),
+      ).toEqual({
+        created_at: MIN_DATE_TIMESTAMP,
+        expires_at: MIN_DATE_TIMESTAMP + 1,
       });
     });
   });
@@ -1823,6 +1892,14 @@ describe("session event persistence", () => {
       () =>
         approvalEvent(0, at(1), {
           expiresAt: 8_640_000_000_000_001,
+        }),
+    ],
+    [
+      "approval time before Date range",
+      () =>
+        approvalEvent(0, at(1), {
+          createdAt: MIN_DATE_TIMESTAMP - 1,
+          expiresAt: 0,
         }),
     ],
   ])("rejects runtime field validation case %s", async (_label, buildEvent) => {

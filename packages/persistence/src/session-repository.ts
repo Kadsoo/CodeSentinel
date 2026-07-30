@@ -295,8 +295,12 @@ function assertSafeNonNegativeInteger(
 }
 
 function assertApprovalTimestamp(value: unknown): asserts value is number {
-  assertSafeNonNegativeInteger(value);
-  if (value > MAX_DATE_TIMESTAMP) {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < -MAX_DATE_TIMESTAMP ||
+    value > MAX_DATE_TIMESTAMP
+  ) {
     throw persistenceError("INVALID_PERSISTENCE_INPUT");
   }
 }
