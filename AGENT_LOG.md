@@ -111,3 +111,13 @@
 - 关键实施 commits：559a899、c036664、ad74f7e、dab1d0a、6cd0898、0e47fd7、bb159d1。
 - 独立审查：发现并修复 TTL Date upper-bound、selected verification command substitution 与 feature mismatch ordering。最终规格与质量审查均为 COMPLIANT；workspace 旧审查三项已复核为早已修复，无需改动。
 - 最终独立验证：npm test 为 19 files / 382 passed / 6 skipped；npm run typecheck、npm run lint，以及 git diff --check docs-task8-agent-loop-design...HEAD 均 exit 0。
+
+## 2026-07-31 — TASK-009：结构化脱敏持久化
+
+- 范围与隔离：在 `feat/task9-persistence` 本地 worktree 完成。交付 Harness 结构化审计事实、会话/有序时间线/Action/审批/验证/内存的 SQLite 持久化、会话级安全清除，以及中断会话与待审批项的恢复处理；不持久化原始 patch 或 API key。
+- TDD 事实：针对结构化赋值、转义片段、引号/注释/URL 边界、Bearer 边界、截断/幂等性、物理 SQLite 字节和错误契约先补 RED 用例。代表性 RED 为已知前缀转义尾部 3 项失败、注释分隔 Bearer 8 项失败、错误契约 1 项失败；随后以最小实现修复。
+- 脱敏边界：可可靠解析的合法语法仅替换敏感值并保留相邻安全文本；全局引号/转义无法可靠分段，或敏感候选无法安全解析时，整段输入替换为 `[REDACTED]`。DB、journal、WAL 和 SHM 均纳入字节扫描。
+- 错误与完整性：持久化错误码以不可写、不可配置的自有属性公开；repository 对 session/action/approval/verification/memory/recovery 的因果与顺序完整性 fail closed。
+- 最终检查：focused redaction/repository/error 为 418/418；六个 Task 9 persistence 测试文件为 491/491；全量 `npm test` 为 26 files、907 passed、6 skipped；`npm run typecheck`、`npm run lint`、`npm run build` 和 `git diff --check` 均 exit 0。
+- 独立复核：最终规格/质量和安全/错误契约两次复核均为 Ready，Critical/Important/Minor 均为 0；复验原始及 escaped token 尾部、注释分隔 Bearer、SQLite 全部旁文件字节，以及运行时错误码不可变性。
+- 本地提交：`7f9cc43` 至 `36fa320` 的 Task 9 提交均只在本地分支；未调用真实 Provider、network 或 credentials，未推送、创建 PR 或合并。

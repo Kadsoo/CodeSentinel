@@ -520,20 +520,22 @@ git commit -m "feat: add provider and credential abstractions"
 - **Implementation commits:** 559a899, c036664, ad74f7e, dab1d0a, 6cd0898, 0e47fd7, bb159d1.
 - **Final verification (all green before completion):** npm test — 19 files, 382 passed, 6 skipped; npm run typecheck — exit 0; npm run lint — exit 0; git diff --check docs-task8-agent-loop-design...HEAD — exit 0.
 
-### Task 9: Persist sessions and redact stored output
+### Task 9: [x] Completed 2026-07-31 — Persist structured redacted session history
 
 **Dependencies:** Tasks 2 and 8.
-
-**Status:** Design approved; detailed implementation plan awaiting owner review.
 
 **Authoritative documents:**
 
 - Design: `docs/superpowers/specs/2026-07-30-task9-redacted-persistence-design.md`
 - Implementation plan: `docs/superpowers/plans/2026-07-30-task9-redacted-persistence.md`
 
-**Approved scope:** Extend the Harness event contract with non-secret structured facts, make Core emit stable action/Policy/tool/verification/state/approval metadata, and add a hardened `better-sqlite3` repository for sessions, ordered timeline events, action records, approval metadata, verification runs and bounded session memory. Every public text path is redacted before persistence; clear is session-scoped and uses secure delete; explicit restart recovery stops nonterminal sessions and expires pending approvals without persisting or restoring raw patches.
+**Delivered scope:** Extend the Harness event contract with non-secret structured facts, make Core emit stable action/Policy/tool/verification/state/approval metadata, and add a hardened `better-sqlite3` repository for sessions, ordered timeline events, action records, approval metadata, verification runs and bounded session memory. Every public text path is redacted before persistence; clear is session-scoped and uses secure delete; explicit restart recovery stops nonterminal sessions and expires pending approvals without persisting or restoring raw patches.
 
-The detailed plan supersedes the earlier compound `appendAction` sketch. Execution must use its nine TDD tasks, independent specification and security reviews, full verification, and final evidence update.
+**TDD and security hardening:** Explicit RED cases covered structured assignments, escaped key/value fragments, quote/comment/URL boundary ambiguity, Bearer-token boundaries, bounded truncation/idempotence, SQLite physical bytes, and immutable persistence error codes. Representative RED observations before the minimal fixes were 3 known-prefix escape-tail failures, 8 comment-separated Bearer failures, and 1 error-contract failure. Valid syntax preserves adjacent safe text; ambiguous syntax or a sensitive candidate that cannot be safely segmented becomes the whole `[REDACTED]` input.
+
+**Local implementation commits:** `7f9cc43`, `122d2ab`, `dafbbbf`, `570968e`, `f7b4ec6`, `0934bef`, `5d39847`, `07e8334`, `e90aa65`, `a0b7104`, `1efabeb`, `c2b6a6e`, `8d57af3`, `159ab61`, `cc71a05`, `a89821c`, `2812272`, `044fd48`, `9636dae`, `a939f9f`, `237ecd1`, `7a6ca3b`, `36fa320`.
+
+**Final evidence:** Focused redaction/repository/error tests: 418/418; the six Task 9 persistence test files: 491/491; full workspace `npm test`: 26 files, 907 passed, 6 skipped. `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` each exited 0. Two independent final reviews reported Ready with 0 Critical, 0 Important, and 0 Minor findings; they rechecked raw and escaped token tails, comment-separated Bearer input, SQLite DB/journal/WAL/SHM bytes, and runtime error-code immutability. No provider, credential, network, push, PR, or merge was used.
 
 ### Task 10: Expose the local Fastify API and CLI
 
