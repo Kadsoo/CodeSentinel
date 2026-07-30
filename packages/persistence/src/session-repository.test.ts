@@ -1239,6 +1239,69 @@ describe("session event persistence", () => {
     });
   });
 
+  it.each([
+    ["wrong action kind", "read_file", "allow"],
+    ["missing policy", "run_verification", undefined],
+    ["ask policy", "run_verification", "ask"],
+    ["deny policy", "run_verification", "deny"],
+  ] as const)(
+    "rejects test-repair running verification with %s without partial writes",
+    async (_label, actionKind, decision) => {
+      await withFileRepository(async (repository, databasePath) => {
+        await createRunningSession(repository);
+        await repository.append(
+          actionEvent(1, at(1), actionKind, ACTION_ID),
+        );
+        if (decision !== undefined) {
+          await repository.append(policyEvent(1, at(2), decision));
+        }
+        const timelineBefore = await repository.loadTimeline(SESSION_ID);
+        const sessionBefore = await repository.loadSession(SESSION_ID);
+        const normalizedBefore = inspectDatabase(
+          databasePath,
+          (database) => ({
+            verifications: database
+              .prepare("SELECT * FROM verification_runs ORDER BY run_id")
+              .all(),
+            action: database
+              .prepare(`
+                SELECT result_summary
+                FROM action_records
+                WHERE action_id = ?
+              `)
+              .get(ACTION_ID),
+          }),
+        );
+
+        await expectRejected(
+          repository.append(verificationEvent(1, at(3))),
+          "INVALID_EVENT_SEQUENCE",
+        );
+
+        expect(await repository.loadTimeline(SESSION_ID)).toEqual(
+          timelineBefore,
+        );
+        expect(await repository.loadSession(SESSION_ID)).toEqual(
+          sessionBefore,
+        );
+        expect(
+          inspectDatabase(databasePath, (database) => ({
+            verifications: database
+              .prepare("SELECT * FROM verification_runs ORDER BY run_id")
+              .all(),
+            action: database
+              .prepare(`
+                SELECT result_summary
+                FROM action_records
+                WHERE action_id = ?
+              `)
+              .get(ACTION_ID),
+          })),
+        ).toEqual(normalizedBefore);
+      });
+    },
+  );
+
   it("returns SESSION_NOT_FOUND for append and an empty timeline for unknown load", async () => {
     await withRepository(async (repository) => {
       await expectRejected(
