@@ -9,3 +9,14 @@ export {
 export type { PersistenceErrorCode } from "./constants.js";
 export { CodeSentinelPersistenceError, persistenceError } from "./errors.js";
 export { redactText } from "./redaction.js";
+export { createSessionRepository } from "./session-repository.js";
+export type {
+  AppendActionInput,
+  AppendVerificationInput,
+  CreatePersistedSessionInput,
+  PersistedSession,
+  PersistedSessionMemory,
+  SaveApprovalInput,
+  SaveSessionMemoryInput,
+  SessionRepository,
+} from "./types.js";
