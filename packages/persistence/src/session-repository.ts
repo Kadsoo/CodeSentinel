@@ -1285,17 +1285,46 @@ function eventsEqual(actual: HarnessEvent, expected: HarnessEvent): boolean {
   }
 }
 
-function timelinesEqual(
-  actual: readonly HarnessEvent[],
-  expected: readonly HarnessEvent[],
+function storedRowsEqual(
+  actual: readonly unknown[],
+  expected: readonly unknown[],
 ): boolean {
   return (
     actual.length === expected.length &&
-    actual.every((event, index) => {
-      const expectedEvent = expected[index];
+    actual.every((actualRow, index) => {
+      const expectedRow = expected[index];
+      if (
+        typeof actualRow !== "object" ||
+        actualRow === null ||
+        typeof expectedRow !== "object" ||
+        expectedRow === null
+      ) {
+        return false;
+      }
+      const actualKeys = Reflect.ownKeys(actualRow);
+      const expectedKeys = Reflect.ownKeys(expectedRow);
       return (
-        expectedEvent !== undefined &&
-        eventsEqual(event, expectedEvent)
+        actualKeys.length === expectedKeys.length &&
+        actualKeys.every((key) => {
+          if (!expectedKeys.includes(key)) {
+            return false;
+          }
+          const actualDescriptor = Object.getOwnPropertyDescriptor(
+            actualRow,
+            key,
+          );
+          const expectedDescriptor = Object.getOwnPropertyDescriptor(
+            expectedRow,
+            key,
+          );
+          return (
+            actualDescriptor !== undefined &&
+            "value" in actualDescriptor &&
+            expectedDescriptor !== undefined &&
+            "value" in expectedDescriptor &&
+            Object.is(actualDescriptor.value, expectedDescriptor.value)
+          );
+        })
       );
     })
   );
@@ -1990,8 +2019,8 @@ export function createSessionRepository(databasePath: string): SessionRepository
         const sessionTimelineCountBefore = storedCount(
           selectSessionTimelineCount.get(input.sessionId),
         );
-        const timelineBefore = selectTimeline
-          .all(input.sessionId)
+        const timelineRowsBefore = selectTimeline.all(input.sessionId);
+        const timelineBefore = timelineRowsBefore
           .map((row) => mapTimelineRow(row, input.sessionId));
         if (
           sessionCountBefore !== (existing === undefined ? 0 : 1) ||
@@ -2041,12 +2070,13 @@ export function createSessionRepository(databasePath: string): SessionRepository
         } catch {
           throw persistenceError("PERSISTENCE_FAILED");
         }
-        const timelineAfter = selectTimeline
-          .all(input.sessionId)
+        const timelineRowsAfter = selectTimeline.all(input.sessionId);
+        const timelineAfter = timelineRowsAfter
           .map((row) => mapTimelineRow(row, input.sessionId));
         if (
           !sessionsEqual(sessionAfter, sessionBefore) ||
-          !timelinesEqual(timelineAfter, timelineBefore) ||
+          timelineAfter.length !== sessionTimelineCountBefore ||
+          !storedRowsEqual(timelineRowsAfter, timelineRowsBefore) ||
           storedCount(selectGlobalTimelineCount.get()) !==
             globalTimelineCountBefore ||
           storedCount(selectSessionTimelineCount.get(input.sessionId)) !==

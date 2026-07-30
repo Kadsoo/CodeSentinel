@@ -2178,6 +2178,41 @@ describe("session event persistence", () => {
     });
   });
 
+  it("rolls back memory when an AFTER trigger renumbers an existing timeline row", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository);
+      const businessBefore = businessSnapshot(databasePath);
+      const sessionBefore = await repository.loadSession(SESSION_ID);
+      const timelineBefore = await repository.loadTimeline(SESSION_ID);
+      inspectDatabase(databasePath, (database) => {
+        database.exec(`
+          CREATE TRIGGER renumber_timeline_from_memory
+          AFTER INSERT ON session_memory
+          BEGIN
+            UPDATE timeline_events
+            SET event_id = event_id + 100
+            WHERE session_id = NEW.session_id;
+          END
+        `);
+      });
+
+      await expectRejected(
+        repository.saveSessionMemory(saveMemoryInput()),
+        "PERSISTENCE_FAILED",
+      );
+      await expect(
+        repository.loadSessionMemory(SESSION_ID),
+      ).resolves.toBeUndefined();
+      expect(await repository.loadSession(SESSION_ID)).toEqual(
+        sessionBefore,
+      );
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual(
+        timelineBefore,
+      );
+      expect(businessSnapshot(databasePath)).toEqual(businessBefore);
+    });
+  });
+
   it("maps a corrupted owning session to PERSISTENCE_FAILED on memory save", async () => {
     await withFileRepository(async (repository, databasePath) => {
       await repository.createSession(validSession());
