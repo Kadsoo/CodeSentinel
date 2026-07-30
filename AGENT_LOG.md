@@ -102,3 +102,12 @@
 - 输出安全：分别处理 stdout/stderr，固定顺序汇总；对终端控制序列、Cc/Cf、JSON/环境变量形式和常见 token/secret 进行有界脱敏。未知或未完成的终端序列、未闭合 JSON 或悬空敏感赋值会保守返回安全摘要。实现不把 npm script 当作 sandbox，也只尽力终止直接 child。
 - 实际检查：最终 focused runner 测试 77/77；跨包回归 131/131；合并前全量 `npm test` 为 167 通过、3 个平台跳过；`npm run typecheck`、`npm run lint` 和 diff 检查通过。合并后的 `main` 再次运行 `npm test`，为 9 文件通过、167 通过、3 跳过。
 - 保留边界：信任本机 Node/npm 安装，不能消除本地管理员替换或 OS 级 TOCTOU；不保证终止子孙进程，也不提供 OS 级隔离。Task 8 仍必须使用同一配置快照完成 Action/Policy/workspace 授权。
+
+## 2026-07-30 — TASK-008：受控 Agent Loop
+
+- 隔离与状态：在 feat/task8-agent-loop 隔离分支完成，最终提交为 bb159d1，未推送。没有长驻进程；全部 test process 均已完成/退出。未调用真实 Provider、network 或 credentials。
+- TDD 事实：Task 8 feature-flow RED 的 8 个新用例中有 3 个失败，分别为缺 Expected stage、意外将 test GREEN 作为完成、以及 RED 后未转入 implementation。Task 8 approval-resume 的 Date 最大值/15min TTL 情形会错误创建 pending。命令绑定 repair RED 为 58 tests 中 1 failed（完成而非阻断）；feature RED 为 9 tests 中 1 failed（得到 FEATURE_STAGE_INVALID 而非 POLICY_DENIED）。
+- 后续补充两轮 mutation testing：额外的 verification event 会使期望 1 收到 2；改变 selected feature phase 码会失败；将 policy event 从 ALLOWED 改为 POLICY_DENIED 时，两条事件序列测试均失败。
+- 关键实施 commits：559a899、c036664、ad74f7e、dab1d0a、6cd0898、0e47fd7、bb159d1。
+- 独立审查：发现并修复 TTL Date upper-bound、selected verification command substitution 与 feature mismatch ordering。最终规格与质量审查均为 COMPLIANT；workspace 旧审查三项已复核为早已修复，无需改动。
+- 最终独立验证：npm test 为 19 files / 382 passed / 6 skipped；npm run typecheck、npm run lint，以及 git diff --check docs-task8-agent-loop-design...HEAD 均 exit 0。

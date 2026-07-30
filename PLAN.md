@@ -511,87 +511,14 @@ git add packages/providers
 git commit -m "feat: add provider and credential abstractions"
 ~~~
 
-### Task 8: Implement the self-authored Agent Loop and feedback stops
+### Task 8: [x] Completed 2026-07-30 — Implement the self-authored Agent Loop and feedback stops
 
-**Dependencies:** Tasks 4, 5, 6 and 7.
-
-**Files:**
-- Create: packages/core/package.json
-- Create: packages/core/src/agent-loop.ts
-- Create: packages/core/src/context.ts
-- Create: packages/core/src/in-memory-event-sink.ts
-- Create: packages/core/src/tool-dispatcher.ts
-- Create: packages/core/src/agent-loop.test.ts
-- Create: packages/core/src/index.ts
-
-- [ ] **Step 1: Write failing loop tests**
-
-~~~ts
-import { describe, expect, it, vi } from "vitest";
-import { ScriptedMockProvider } from "@codesentinel/providers";
-import { InMemoryEventSink } from "./in-memory-event-sink.js";
-import { createToolDispatcher } from "./tool-dispatcher.js";
-import { runAgentSession } from "./agent-loop.js";
-
-const failedVerification = { commandId: "test", exitCode: 1, timedOut: false, durationMs: 4, summary: "expected 2, received 1" };
-
-it("feeds a failed verification result into the next provider request", async () => {
-  const provider = new ScriptedMockProvider([
-    { kind: "run_verification", commandId: "test" },
-    { kind: "finish", outcome: "needs_human", summary: "inspect failure" },
-  ]);
-  const trace = await runAgentSession({
-    session: { id: "s1", taskKind: "test_repair", state: "created", round: 0, workspaceId: "w1", providerId: "p1" },
-    provider,
-    policy: { evaluate: () => ({ decision: "allow", reason: "ALLOWED" }) },
-    tools: createToolDispatcher({ runVerification: vi.fn().mockResolvedValue(failedVerification) }),
-    eventSink: new InMemoryEventSink(),
-  });
-  expect(trace.providerRequests[1].messages.at(-1)?.content).toContain("expected 2");
-});
-
-it("stops after three unsuccessful repair rounds", async () => {
-  const provider = new ScriptedMockProvider([
-    { kind: "run_verification", commandId: "test" },
-    { kind: "run_verification", commandId: "test" },
-    { kind: "run_verification", commandId: "test" },
-  ]);
-  const trace = await runAgentSession({
-    session: { id: "s2", taskKind: "test_repair", state: "created", round: 0, workspaceId: "w2", providerId: "p2" },
-    provider,
-    policy: { evaluate: () => ({ decision: "allow", reason: "ALLOWED" }) },
-    tools: createToolDispatcher({ runVerification: vi.fn().mockResolvedValue(failedVerification) }),
-    eventSink: new InMemoryEventSink(),
-  });
-  expect(trace.session.state).toBe("failed");
-  expect(trace.session.round).toBe(3);
-});
-~~~
-
-- [ ] **Step 2: Run loop tests to record red**
-
-Run: npm test -- --run packages/core/src/agent-loop.test.ts
-Expected: FAIL because runAgentSession is missing.
-
-- [ ] **Step 3: Implement the loop without framework agent runners**
-
-Create runAgentSession with explicit session, provider, policy, tools and EventSink dependencies. Define ToolDispatcher with a method per Action and createToolDispatcher(overrides) to supply deterministic unsupported-tool errors for omitted methods in tests. It assembles sanitized context, calls the injected Provider once per step, validates one returned Action with ActionSchema, evaluates it with Policy Guardrail, dispatches it through injected tools, appends an event through EventSink and feeds a structured result into the next request. Enter awaiting_approval for a patch proposal; do not apply it until the separate approval route resumes the session. Stop on pass, non-reproducible initial test, user rejection, deny decision, unrecoverable tool error or round three. InMemoryEventSink exists only for core tests; Task 9 supplies the SQLite implementation.
-
-- [ ] **Step 4: Verify feedback and stopping**
-
-Run: npm test -- --run packages/core/src/agent-loop.test.ts
-Expected: PASS with no network calls.
-Run: npm test
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-Run:
-
-~~~bash
-git add packages/core
-git commit -m "feat: add bounded feedback-driven agent loop"
-~~~
+- **Delivered scope:** the Core workspace provides the self-authored loop: initial test-repair verification, including the NOT_REPRODUCIBLE stop; on every round, one schema-validated Action passes through BoundPolicy and the dispatcher; Provider decisions are capped at three and receive redacted feedback. Safe, bounded workspace browsing and event emission are included.
+- **Approval and feature controls:** patch approval resumes privately and only once, using SHA-256 patch/base hashes, TTL enforcement, an atomic claim, and event-before-write ordering. Feature sessions enforce test → RED → implementation → GREEN phase gates.
+- **Verification-command binding:** every Provider-selected verification command is strictly bound to the session. A repair or feature mismatch is POLICY_DENIED; selecting the feature command at an invalid feature stage is FEATURE_STAGE_INVALID.
+- **Test boundary:** all coverage uses deterministic tests without network access, real Provider calls, or real credentials.
+- **Implementation commits:** 559a899, c036664, ad74f7e, dab1d0a, 6cd0898, 0e47fd7, bb159d1.
+- **Final verification (all green before completion):** npm test — 19 files, 382 passed, 6 skipped; npm run typecheck — exit 0; npm run lint — exit 0; git diff --check docs-task8-agent-loop-design...HEAD — exit 0.
 
 ### Task 9: Persist sessions and redact stored output
 
