@@ -37,6 +37,8 @@ type QuotedSegment = Readonly<{
   contentEnd: number;
   end: number;
   decoded: string;
+  hadEscape: boolean;
+  hadRawControlOrFormat: boolean;
 }>;
 
 type LexedText = Readonly<{
@@ -52,14 +54,33 @@ type ScanOutcome =
   | Readonly<{ kind: "safe" }>
   | Readonly<{ kind: "ambiguous" }>;
 
+type BearerScanOutcome =
+  | Readonly<{
+      kind: "safe";
+      value: string;
+    }>
+  | Readonly<{ kind: "ambiguous" }>;
+
 type ValueScanOutcome =
   | Readonly<{ kind: "safe"; end: number }>
   | Readonly<{ kind: "ambiguous" }>;
+
+type SensitiveCandidateSummary = ReadonlyMap<string, number>;
+
+type PotentialAssignmentOutcome =
+  | "none"
+  | "candidate"
+  | "terminal-ambiguous";
 
 type MalformedKeyCandidate = Readonly<{
   end: number;
   sensitive: boolean;
 }>;
+
+type CommentProjectionMode =
+  | "remove"
+  | "preserve-body"
+  | "separator";
 
 function isAsciiLetter(character: string): boolean {
   const code = character.charCodeAt(0);
@@ -188,6 +209,8 @@ function scanQuotedSegment(
 ): QuotedSegment | undefined {
   const quote = value[start]!;
   const decoded: string[] = [];
+  let hadEscape = false;
+  let hadRawControlOrFormat = false;
   for (let cursor = start + 1; cursor < value.length; ) {
     const character = value[cursor]!;
     if (character === quote) {
@@ -197,14 +220,19 @@ function scanQuotedSegment(
         contentEnd: cursor,
         end: cursor + 1,
         decoded: decoded.join(""),
+        hadEscape,
+        hadRawControlOrFormat,
       };
     }
     if (character !== "\\") {
       decoded.push(character);
+      hadRawControlOrFormat ||=
+        isControlOrFormatCharacter(character);
       cursor += 1;
       continue;
     }
 
+    hadEscape = true;
     const escaped = value[cursor + 1];
     if (escaped === undefined) {
       return undefined;
@@ -217,9 +245,10 @@ function scanQuotedSegment(
       ) {
         return undefined;
       }
-      decoded.push(
-        String.fromCharCode(Number.parseInt(hexadecimal, 16)),
+      const decodedCharacter = String.fromCharCode(
+        Number.parseInt(hexadecimal, 16),
       );
+      decoded.push(decodedCharacter);
       cursor += 6;
       continue;
     }
@@ -295,10 +324,16 @@ function hasShiftedSensitiveQuoteCandidate(
       previous.end,
       next.start,
     );
-    if (decoded === undefined || isSensitiveName(decoded)) {
+    const semanticCandidate = decoded?.trim();
+    if (
+      semanticCandidate === undefined ||
+      isSensitiveName(semanticCandidate)
+    ) {
       return true;
     }
-    const candidateEnd = hasSensitiveNamePrefix(decoded);
+    const candidateEnd = hasSensitiveNamePrefix(
+      semanticCandidate,
+    );
     if (candidateEnd !== undefined) {
       return true;
     }
@@ -329,6 +364,888 @@ function lexText(value: string): LexOutcome {
     kind: "safe",
     lexed: { segments, segmentByStart },
   };
+}
+
+function recordSensitiveCandidate(
+  candidates: Map<string, number>,
+  candidate: string,
+): void {
+  candidates.set(
+    candidate,
+    (candidates.get(candidate) ?? 0) + 1,
+  );
+}
+
+function hasPotentialAssignmentAfterSensitiveName(
+  value: string,
+  start: number,
+  interpretResidualEscapes: boolean,
+  allowAmbiguousJoiners: boolean,
+): PotentialAssignmentOutcome {
+  let cursor = start;
+  while (cursor < value.length) {
+    cursor = skipWhitespace(value, cursor);
+    if (value[cursor] === ":" || value[cursor] === "=") {
+      return "candidate";
+    }
+    if (value[cursor] === "\"" || value[cursor] === "'") {
+      if (!allowAmbiguousJoiners) {
+        return "none";
+      }
+      cursor += 1;
+      continue;
+    }
+    if (
+      value[cursor] === "/" &&
+      value[cursor + 1] === "*"
+    ) {
+      if (!allowAmbiguousJoiners) {
+        return "none";
+      }
+      return "terminal-ambiguous";
+    }
+    if (
+      value[cursor] === "/" &&
+      value[cursor + 1] === "/"
+    ) {
+      if (!allowAmbiguousJoiners) {
+        return "none";
+      }
+      return "terminal-ambiguous";
+    }
+    if (!interpretResidualEscapes || value[cursor] !== "\\") {
+      return "none";
+    }
+
+    const escaped = value[cursor + 1];
+    if (escaped === ":" || escaped === "=") {
+      return "candidate";
+    }
+    if (escaped === "\"" || escaped === "'") {
+      cursor += 2;
+      continue;
+    }
+    if (escaped !== "u") {
+      return "none";
+    }
+    const hexadecimal = value.slice(cursor + 2, cursor + 6);
+    if (
+      hexadecimal.length !== 4 ||
+      ![...hexadecimal].every(isHexadecimalCharacter)
+    ) {
+      return "none";
+    }
+    const decoded = String.fromCharCode(
+      Number.parseInt(hexadecimal, 16),
+    );
+    if (decoded === ":" || decoded === "=") {
+      return "candidate";
+    }
+    if (decoded !== "\"" && decoded !== "'") {
+      return "none";
+    }
+    cursor += 6;
+  }
+  return "none";
+}
+
+function collectAssignmentCandidates(
+  value: string,
+  candidates: Map<string, number>,
+  interpretResidualEscapes: boolean,
+  allowAmbiguousJoiners: boolean,
+): void {
+  for (let index = 0; index < value.length; ) {
+    const character = value[index]!;
+    const previous = value[index - 1];
+    if (
+      !isAsciiLetter(character) ||
+      (previous !== undefined && isAsciiWordCharacter(previous))
+    ) {
+      index += 1;
+      continue;
+    }
+
+    let nameEnd = index + 1;
+    while (
+      nameEnd < value.length &&
+      isNameCharacter(value[nameEnd]!)
+    ) {
+      nameEnd += 1;
+    }
+    const name = value.slice(index, nameEnd);
+    if (!isSensitiveName(name)) {
+      index = nameEnd;
+      continue;
+    }
+
+    const assignment = hasPotentialAssignmentAfterSensitiveName(
+      value,
+      nameEnd,
+      interpretResidualEscapes,
+      allowAmbiguousJoiners,
+    );
+    if (assignment !== "none") {
+      recordSensitiveCandidate(
+        candidates,
+        `assignment:${normalizedSensitiveName(name)}`,
+      );
+      if (assignment === "terminal-ambiguous") {
+        return;
+      }
+    }
+    index = nameEnd;
+  }
+}
+
+function isBearerOpeningWrapper(
+  character: string | undefined,
+): boolean {
+  return (
+    character === "\"" ||
+    character === "'" ||
+    character === "[" ||
+    character === "{" ||
+    character === "(" ||
+    character === "<"
+  );
+}
+
+function bearerClosingWrapper(
+  character: string | undefined,
+): string | undefined {
+  switch (character) {
+    case "\"":
+      return "\"";
+    case "'":
+      return "'";
+    case "[":
+      return "]";
+    case "{":
+      return "}";
+    case "(":
+      return ")";
+    case "<":
+      return ">";
+    default:
+      return undefined;
+  }
+}
+
+function isCanonicalRedactedBearerToken(
+  value: string,
+  start: number,
+): boolean {
+  if (!value.startsWith(REDACTED_VALUE, start)) {
+    return false;
+  }
+  const end = start + REDACTED_VALUE.length;
+  return isBearerTokenDelimiter(value[end]);
+}
+
+function collectBearerCandidates(
+  value: string,
+  candidates: Map<string, number>,
+  interpretResidualEscapes: boolean,
+): void {
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index]?.toLowerCase() !== "b") {
+      continue;
+    }
+    const previous = value[index - 1];
+    if (previous !== undefined && isAsciiWordCharacter(previous)) {
+      continue;
+    }
+    const keywordEnd = matchBearerKeyword(value, index);
+    if (keywordEnd === undefined) {
+      continue;
+    }
+    let tokenStart = keywordEnd;
+    let hasSeparator = false;
+    while (isWhitespace(value[tokenStart])) {
+      hasSeparator = true;
+      tokenStart += 1;
+    }
+    if (
+      !hasSeparator ||
+      isCanonicalRedactedBearerToken(value, tokenStart)
+    ) {
+      continue;
+    }
+    const tokenStartCharacter = value[tokenStart];
+    if (
+      tokenStartCharacter === undefined ||
+      (!interpretResidualEscapes &&
+        tokenStartCharacter === "\\")
+    ) {
+      continue;
+    }
+    if (
+      !isBearerOpeningWrapper(tokenStartCharacter) &&
+      isBearerTokenDelimiter(tokenStartCharacter)
+    ) {
+      continue;
+    }
+    const wrapperEnd = bearerClosingWrapper(
+      tokenStartCharacter,
+    );
+    const signatureLimit = Math.min(
+      value.length,
+      tokenStart + 64,
+    );
+    let tokenEnd = tokenStart + 1;
+    while (tokenEnd < signatureLimit) {
+      if (
+        wrapperEnd !== undefined
+          ? value[tokenEnd] === wrapperEnd
+          : isBearerTokenDelimiter(value[tokenEnd])
+      ) {
+        if (
+          wrapperEnd !== undefined &&
+          value[tokenEnd] === wrapperEnd
+        ) {
+          tokenEnd += 1;
+        }
+        break;
+      }
+      tokenEnd += 1;
+    }
+    recordSensitiveCandidate(
+      candidates,
+      `bearer:${value
+        .slice(tokenStart, tokenEnd)
+        .toLowerCase()}`,
+    );
+  }
+}
+
+function collectTokenCandidates(
+  value: string,
+  candidates: Map<string, number>,
+): void {
+  for (let index = 0; index < value.length; ) {
+    if (!isLongTokenCharacter(value[index]!)) {
+      index += 1;
+      continue;
+    }
+    let tokenEnd = index + 1;
+    while (
+      tokenEnd < value.length &&
+      isLongTokenCharacter(value[tokenEnd]!)
+    ) {
+      tokenEnd += 1;
+    }
+    if (tokenEnd - index >= 32) {
+      recordSensitiveCandidate(
+        candidates,
+        `long:${value.slice(index, tokenEnd)}`,
+      );
+    }
+
+    for (
+      let knownRunStart = index;
+      knownRunStart < tokenEnd;
+    ) {
+      while (
+        knownRunStart < tokenEnd &&
+        !isKnownTokenSuffixCharacter(value[knownRunStart]!)
+      ) {
+        knownRunStart += 1;
+      }
+      if (knownRunStart >= tokenEnd) {
+        break;
+      }
+      let knownRunEnd = knownRunStart + 1;
+      while (
+        knownRunEnd < tokenEnd &&
+        isKnownTokenSuffixCharacter(value[knownRunEnd]!)
+      ) {
+        knownRunEnd += 1;
+      }
+
+      let containsKnownToken = false;
+      for (
+        let cursor = knownRunStart;
+        cursor < knownRunEnd && !containsKnownToken;
+        cursor += 1
+      ) {
+        const previous = value[cursor - 1];
+        if (
+          previous !== undefined &&
+          isAsciiWordCharacter(previous)
+        ) {
+          continue;
+        }
+        containsKnownToken = KNOWN_TOKEN_PREFIXES.some(
+          (prefix) =>
+            cursor + prefix.length + 12 <= knownRunEnd &&
+            value
+              .slice(cursor, cursor + prefix.length)
+              .toLowerCase() === prefix,
+        );
+      }
+      if (containsKnownToken) {
+        recordSensitiveCandidate(
+          candidates,
+          `known:${value
+            .slice(knownRunStart, knownRunEnd)
+            .toLowerCase()}`,
+        );
+      }
+      knownRunStart = knownRunEnd;
+    }
+    index = tokenEnd;
+  }
+}
+
+function decodeResidualSensitiveEscapes(value: string): string {
+  const output: string[] = [];
+  for (let cursor = 0; cursor < value.length; ) {
+    if (value[cursor] !== "\\") {
+      output.push(value[cursor]!);
+      cursor += 1;
+      continue;
+    }
+
+    while (value[cursor] === "\\") {
+      cursor += 1;
+    }
+    if (cursor >= value.length) {
+      break;
+    }
+    if (value[cursor] === "\r") {
+      cursor += 1;
+      if (value[cursor] === "\n") {
+        cursor += 1;
+      }
+      continue;
+    }
+    if (value[cursor] === "\n") {
+      cursor += 1;
+      continue;
+    }
+    if (value[cursor] !== "u" && value[cursor] !== "x") {
+      continue;
+    }
+
+    let decodedAny = false;
+    while (value[cursor] === "u" || value[cursor] === "x") {
+      const hexadecimalLength =
+        value[cursor] === "u" ? 4 : 2;
+      const hexadecimal = value.slice(
+        cursor + 1,
+        cursor + 1 + hexadecimalLength,
+      );
+      if (
+        hexadecimal.length !== hexadecimalLength ||
+        ![...hexadecimal].every(isHexadecimalCharacter)
+      ) {
+        break;
+      }
+      decodedAny = true;
+      const decoded = String.fromCharCode(
+        Number.parseInt(hexadecimal, 16),
+      );
+      output.push(decoded);
+      cursor += 1 + hexadecimalLength;
+      if (decoded !== "\\") {
+        break;
+      }
+      while (value[cursor] === "\\") {
+        cursor += 1;
+      }
+    }
+    if (!decodedAny) {
+      output.push(value[cursor]!);
+      cursor += 1;
+    }
+  }
+  return output.join("");
+}
+
+function removeAmbiguousSensitiveJoiners(
+  value: string,
+  commentMode: CommentProjectionMode = "remove",
+): string {
+  const output: string[] = [];
+  let inUrlSpan = false;
+  for (let cursor = 0; cursor < value.length; ) {
+    if (value[cursor] === "\"" || value[cursor] === "'") {
+      inUrlSpan = false;
+      cursor += 1;
+      continue;
+    }
+    if (isWhitespace(value[cursor])) {
+      inUrlSpan = false;
+    }
+    if (
+      value[cursor] === "/" &&
+      value[cursor + 1] === "*"
+    ) {
+      cursor += 2;
+      if (commentMode === "preserve-body") {
+        continue;
+      }
+      while (
+        cursor + 1 < value.length &&
+        (value[cursor] !== "*" || value[cursor + 1] !== "/")
+      ) {
+        cursor += 1;
+      }
+      cursor = Math.min(value.length, cursor + 2);
+      if (commentMode === "separator") {
+        output.push(" ");
+        inUrlSpan = false;
+      }
+      continue;
+    }
+    if (
+      commentMode === "preserve-body" &&
+      value[cursor] === "*" &&
+      value[cursor + 1] === "/"
+    ) {
+      cursor += 2;
+      continue;
+    }
+    if (
+      value[cursor] === "/" &&
+      value[cursor + 1] === "/"
+    ) {
+      if (value[cursor - 1] === ":" || inUrlSpan) {
+        inUrlSpan = true;
+        output.push("//");
+        cursor += 2;
+        continue;
+      }
+      cursor += 2;
+      if (commentMode === "preserve-body") {
+        continue;
+      }
+      while (
+        cursor < value.length &&
+        value[cursor] !== "\n" &&
+        value[cursor] !== "\r"
+      ) {
+        cursor += 1;
+      }
+      if (value[cursor] === "\r") {
+        cursor += 1;
+      }
+      if (value[cursor] === "\n") {
+        cursor += 1;
+      }
+      if (commentMode === "separator") {
+        output.push(" ");
+        inUrlSpan = false;
+      }
+      continue;
+    }
+    if (value[cursor] !== "\\") {
+      output.push(value[cursor]!);
+      cursor += 1;
+      continue;
+    }
+    while (value[cursor] === "\\") {
+      cursor += 1;
+    }
+    if (value[cursor] === "\r") {
+      cursor += 1;
+      if (value[cursor] === "\n") {
+        cursor += 1;
+      }
+    } else if (value[cursor] === "\n") {
+      cursor += 1;
+    }
+  }
+  return output.join("");
+}
+
+function projectResidualSensitiveJoiners(value: string): string {
+  return removeAmbiguousSensitiveJoiners(
+    decodeResidualSensitiveEscapes(value),
+  );
+}
+
+function projectResidualSensitiveJoinersWithCommentBodies(
+  value: string,
+): string {
+  return removeAmbiguousSensitiveJoiners(
+    decodeResidualSensitiveEscapes(value),
+    "preserve-body",
+  );
+}
+
+function projectResidualSensitiveJoinersWithCommentSeparators(
+  value: string,
+): string {
+  return removeAmbiguousSensitiveJoiners(
+    decodeResidualSensitiveEscapes(value),
+    "separator",
+  );
+}
+
+function summarizeSensitiveCandidates(
+  value: string,
+  interpretResidualEscapes: boolean,
+  allowAmbiguousAssignmentJoiners = true,
+): SensitiveCandidateSummary {
+  const normalized = value.replace(
+    CONTROL_OR_FORMAT_CHARACTERS_PATTERN,
+    "",
+  );
+  const candidates = new Map<string, number>();
+  collectAssignmentCandidates(
+    normalized,
+    candidates,
+    interpretResidualEscapes,
+    allowAmbiguousAssignmentJoiners,
+  );
+  collectBearerCandidates(
+    normalized,
+    candidates,
+    interpretResidualEscapes,
+  );
+  const bearerSeparatorNormalized = value.replace(
+    CONTROL_OR_FORMAT_CHARACTERS_PATTERN,
+    (character) => isWhitespace(character) ? " " : "",
+  );
+  if (bearerSeparatorNormalized !== normalized) {
+    const separatorCandidates = new Map<string, number>();
+    collectBearerCandidates(
+      bearerSeparatorNormalized,
+      separatorCandidates,
+      interpretResidualEscapes,
+    );
+    for (const [candidate, count] of separatorCandidates) {
+      candidates.set(
+        candidate,
+        Math.max(count, candidates.get(candidate) ?? 0),
+      );
+    }
+  }
+  collectTokenCandidates(normalized, candidates);
+  return candidates;
+}
+
+function hasAdditionalSensitiveCandidate(
+  candidates: SensitiveCandidateSummary,
+  baseline: SensitiveCandidateSummary,
+): boolean {
+  for (const [candidate, count] of candidates) {
+    if (count > (baseline.get(candidate) ?? 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isRangeFullyProtected(
+  protectedPositions: Uint8Array,
+  start: number,
+  end: number,
+): boolean {
+  if (start >= end) {
+    return false;
+  }
+  for (let cursor = start; cursor < end; cursor += 1) {
+    if (protectedPositions[cursor] === 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasProtectedPosition(
+  protectedPositions: Uint8Array,
+  start: number,
+  end: number,
+): boolean {
+  for (let cursor = start; cursor < end; cursor += 1) {
+    if (protectedPositions[cursor] !== 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasUnmappableDecodedSensitiveCandidate(
+  value: string,
+  segments: readonly QuotedSegment[],
+  protectedPositions: Uint8Array,
+): boolean {
+  for (const segment of segments) {
+    if (
+      isRangeFullyProtected(
+        protectedPositions,
+        segment.contentStart,
+        segment.contentEnd,
+      )
+    ) {
+      continue;
+    }
+    if (!segment.hadEscape && !segment.hadRawControlOrFormat) {
+      continue;
+    }
+    const decodedCandidates = summarizeSensitiveCandidates(
+      segment.decoded,
+      true,
+    );
+    const projectedCandidates = summarizeSensitiveCandidates(
+      projectResidualSensitiveJoiners(segment.decoded),
+      false,
+    );
+    const commentBodyCandidates = summarizeSensitiveCandidates(
+      projectResidualSensitiveJoinersWithCommentBodies(
+        segment.decoded,
+      ),
+      false,
+    );
+    const commentSeparatorCandidates =
+      summarizeSensitiveCandidates(
+        projectResidualSensitiveJoinersWithCommentSeparators(
+          segment.decoded,
+        ),
+        false,
+      );
+    if (
+      decodedCandidates.size === 0 &&
+      projectedCandidates.size === 0 &&
+      commentBodyCandidates.size === 0 &&
+      commentSeparatorCandidates.size === 0
+    ) {
+      continue;
+    }
+    if (segment.hadRawControlOrFormat) {
+      return true;
+    }
+    const rawCandidates = summarizeSensitiveCandidates(
+      value.slice(segment.contentStart, segment.contentEnd),
+      false,
+      false,
+    );
+    if (
+      hasAdditionalSensitiveCandidate(
+        decodedCandidates,
+        rawCandidates,
+      ) ||
+      hasAdditionalSensitiveCandidate(
+        projectedCandidates,
+        rawCandidates,
+      ) ||
+      hasAdditionalSensitiveCandidate(
+        commentBodyCandidates,
+        rawCandidates,
+      ) ||
+      hasAdditionalSensitiveCandidate(
+        commentSeparatorCandidates,
+        rawCandidates,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function rejoinQuotedSegments(
+  value: string,
+  segments: readonly QuotedSegment[],
+  protectedPositions: Uint8Array,
+): string {
+  const output: string[] = [];
+  const appendProtectedRange = (
+    start: number,
+    end: number,
+  ): void => {
+    let sliceStart = start;
+    for (let cursor = start; cursor < end; ) {
+      if (protectedPositions[cursor] === 0) {
+        cursor += 1;
+        continue;
+      }
+      output.push(value.slice(sliceStart, cursor), REDACTED_VALUE);
+      while (
+        cursor < end &&
+        protectedPositions[cursor] !== 0
+      ) {
+        cursor += 1;
+      }
+      sliceStart = cursor;
+    }
+    output.push(value.slice(sliceStart, end));
+  };
+  let cursor = 0;
+  for (const segment of segments) {
+    appendProtectedRange(cursor, segment.start);
+    const hasProtectedContent = hasProtectedPosition(
+      protectedPositions,
+      segment.contentStart,
+      segment.contentEnd,
+    );
+    if (!hasProtectedContent) {
+      output.push(segment.decoded);
+    } else if (
+      isRangeFullyProtected(
+        protectedPositions,
+        segment.contentStart,
+        segment.contentEnd,
+      ) ||
+      segment.hadEscape ||
+      segment.hadRawControlOrFormat
+    ) {
+      output.push(REDACTED_VALUE);
+    } else {
+      appendProtectedRange(
+        segment.contentStart,
+        segment.contentEnd,
+      );
+    }
+    cursor = segment.end;
+  }
+  appendProtectedRange(cursor, value.length);
+  return output.join("");
+}
+
+function protectedQuotedAssignmentCandidates(
+  value: string,
+  lexed: LexedText,
+  protectedPositions: Uint8Array,
+): SensitiveCandidateSummary {
+  const candidates = new Map<string, number>();
+  for (const key of lexed.segments) {
+    if (!isSensitiveName(key.decoded)) {
+      continue;
+    }
+    let cursor = skipWhitespace(value, key.end);
+    if (value[cursor] !== ":" && value[cursor] !== "=") {
+      continue;
+    }
+    cursor = skipWhitespace(value, cursor + 1);
+    const quotedValue = lexed.segmentByStart.get(cursor);
+    if (
+      quotedValue === undefined ||
+      !isRangeFullyProtected(
+        protectedPositions,
+        quotedValue.contentStart,
+        quotedValue.contentEnd,
+      )
+    ) {
+      continue;
+    }
+    recordSensitiveCandidate(
+      candidates,
+      `assignment:${normalizedSensitiveName(key.decoded)}`,
+    );
+  }
+  return candidates;
+}
+
+function protectedSensitiveCandidateBaseline(
+  value: string,
+  lexed: LexedText,
+  protectedPositions: Uint8Array,
+  protectedValue: string,
+): SensitiveCandidateSummary {
+  const baseline = new Map(
+    summarizeSensitiveCandidates(
+      protectedValue,
+      false,
+      false,
+    ),
+  );
+  for (const [candidate, count] of protectedQuotedAssignmentCandidates(
+    value,
+    lexed,
+    protectedPositions,
+  )) {
+    baseline.set(
+      candidate,
+      Math.max(count, baseline.get(candidate) ?? 0),
+    );
+  }
+  return baseline;
+}
+
+function hasAmbiguousRejoinedSensitiveCandidate(
+  value: string,
+  lexed: LexedText,
+  protectedPositions: Uint8Array,
+  baseline: SensitiveCandidateSummary,
+): boolean {
+  const rejoined = rejoinQuotedSegments(
+    value,
+    lexed.segments,
+    protectedPositions,
+  );
+  return (
+    hasAdditionalSensitiveCandidate(
+      summarizeSensitiveCandidates(
+        rejoined,
+        true,
+        false,
+      ),
+      baseline,
+    ) ||
+    hasAdditionalSensitiveCandidate(
+      summarizeSensitiveCandidates(
+        projectResidualSensitiveJoiners(rejoined),
+        false,
+        false,
+      ),
+      baseline,
+    ) ||
+    hasAdditionalSensitiveCandidate(
+      summarizeSensitiveCandidates(
+        projectResidualSensitiveJoinersWithCommentBodies(
+          rejoined,
+        ),
+        false,
+        false,
+      ),
+      baseline,
+    ) ||
+    hasAdditionalSensitiveCandidate(
+      summarizeSensitiveCandidates(
+        projectResidualSensitiveJoinersWithCommentSeparators(
+          rejoined,
+        ),
+        false,
+        false,
+      ),
+      baseline,
+    )
+  );
+}
+
+function hasAmbiguousProjectedSensitiveCandidate(
+  protectedValue: string,
+  baseline: SensitiveCandidateSummary,
+): boolean {
+  return hasAdditionalSensitiveCandidate(
+    summarizeSensitiveCandidates(
+      projectResidualSensitiveJoiners(protectedValue),
+      false,
+    ),
+    baseline,
+  ) ||
+    hasAdditionalSensitiveCandidate(
+      summarizeSensitiveCandidates(
+        projectResidualSensitiveJoinersWithCommentBodies(
+          protectedValue,
+        ),
+        false,
+      ),
+      baseline,
+    ) ||
+    hasAdditionalSensitiveCandidate(
+      summarizeSensitiveCandidates(
+        projectResidualSensitiveJoinersWithCommentSeparators(
+          protectedValue,
+        ),
+        false,
+      ),
+      baseline,
+    );
 }
 
 function previousBearerBoundaryCharacter(
@@ -414,7 +1331,7 @@ function replaceBearerRanges(
   return output.join("");
 }
 
-function redactBearerTokens(value: string): string {
+function redactBearerTokens(value: string): BearerScanOutcome {
   const ranges: RedactionRange[] = [];
   for (let index = 0; index < value.length; ) {
     if (value[index]?.toLowerCase() !== "b") {
@@ -442,9 +1359,23 @@ function redactBearerTokens(value: string): string {
       tokenStart += 1;
     }
     if (
-      !hasSeparator ||
-      isBearerTokenDelimiter(value[tokenStart])
+      !hasSeparator
     ) {
+      index = keywordEnd;
+      continue;
+    }
+    if (isCanonicalRedactedBearerToken(value, tokenStart)) {
+      index = tokenStart + REDACTED_VALUE.length;
+      continue;
+    }
+    if (
+      isBearerOpeningWrapper(value[tokenStart]) ||
+      (value[tokenStart] === "\\" &&
+        isBearerOpeningWrapper(value[tokenStart + 1]))
+    ) {
+      return { kind: "ambiguous" };
+    }
+    if (isBearerTokenDelimiter(value[tokenStart])) {
       index = keywordEnd;
       continue;
     }
@@ -456,7 +1387,10 @@ function redactBearerTokens(value: string): string {
     ranges.push({ start: keywordEnd, end: tokenEnd });
     index = tokenEnd;
   }
-  return replaceBearerRanges(value, ranges);
+  return {
+    kind: "safe",
+    value: replaceBearerRanges(value, ranges),
+  };
 }
 
 function createRedactionMask(length: number): Int32Array {
@@ -633,15 +1567,50 @@ function hasSensitiveNamePrefix(
   return nameEnd;
 }
 
+function hasCanonicalSensitiveAssignmentRemainder(
+  value: string,
+  nameEnd: number,
+): boolean {
+  let cursor = skipWhitespace(value, nameEnd);
+  if (value[cursor] !== ":" && value[cursor] !== "=") {
+    return false;
+  }
+  cursor = skipWhitespace(value, cursor + 1);
+  if (!value.startsWith(REDACTED_VALUE, cursor)) {
+    return false;
+  }
+  return hasAssignmentValueBoundary(
+    value,
+    cursor + REDACTED_VALUE.length,
+  );
+}
+
+function hasCommentSeparatedAssignment(
+  value: string,
+  start: number,
+  limit = value.length,
+): boolean {
+  const cursor = skipWhitespace(value, start, limit);
+  return (
+    value[cursor] === "/" &&
+    (value[cursor + 1] === "*" || value[cursor + 1] === "/")
+  );
+}
+
 function scanQuotedSensitiveAssignments(
   value: string,
   lexed: LexedText,
   mask: Int32Array,
+  protectedQuotedSegments?: Set<number>,
 ): ScanOutcome {
   for (const key of lexed.segments) {
+    if (protectedQuotedSegments?.has(key.start) === true) {
+      continue;
+    }
     let cursor = skipWhitespace(value, key.end);
     const hasAssignment =
       value[cursor] === ":" || value[cursor] === "=";
+    const assignmentDelimiter = value[cursor];
     if (!isSensitiveName(key.decoded)) {
       const candidateEnd = hasSensitiveNamePrefix(key.decoded);
       const candidateRemainder =
@@ -654,20 +1623,39 @@ function scanQuotedSensitiveAssignments(
           candidateRemainder.includes(":") ||
           candidateRemainder.includes("="))
       ) {
+        if (
+          hasCanonicalSensitiveAssignmentRemainder(
+            key.decoded,
+            candidateEnd,
+          )
+        ) {
+          continue;
+        }
         return { kind: "ambiguous" };
       }
       continue;
     }
     if (!hasAssignment) {
+      if (hasCommentSeparatedAssignment(value, key.end)) {
+        return { kind: "ambiguous" };
+      }
       continue;
     }
 
     cursor = skipWhitespace(value, cursor + 1);
     const quotedValue = lexed.segmentByStart.get(cursor);
     if (quotedValue !== undefined) {
-      if (!hasJsonValueBoundary(value, quotedValue.end)) {
+      const hasBoundary =
+        assignmentDelimiter === "="
+          ? hasAssignmentValueBoundary(
+              value,
+              quotedValue.end,
+            )
+          : hasJsonValueBoundary(value, quotedValue.end);
+      if (!hasBoundary) {
         return { kind: "ambiguous" };
       }
+      protectedQuotedSegments?.add(quotedValue.start);
       if (
         normalizedSensitiveName(key.decoded) !== "authorization" ||
         quotedValue.decoded.toLowerCase() !==
@@ -690,7 +1678,9 @@ function scanQuotedSensitiveAssignments(
     );
     if (
       unquoted.kind === "ambiguous" ||
-      !hasJsonValueBoundary(value, unquoted.end)
+      (assignmentDelimiter === "="
+        ? !hasAssignmentValueBoundary(value, unquoted.end)
+        : !hasJsonValueBoundary(value, unquoted.end))
     ) {
       return { kind: "ambiguous" };
     }
@@ -733,6 +1723,8 @@ function scanBareAssignmentsInRange(
   endIsBoundary: boolean,
   lexed: LexedText,
   mask: Int32Array,
+  onlyQuotedValues: boolean,
+  protectedQuotedSegments?: Set<number>,
 ): ScanOutcome {
   for (let index = start; index < end; ) {
     const character = value[index]!;
@@ -772,6 +1764,15 @@ function scanBareAssignmentsInRange(
 
     let cursor = skipWhitespace(value, nameEnd, end);
     if (value[cursor] !== ":" && value[cursor] !== "=") {
+      if (
+        hasCommentSeparatedAssignment(
+          value,
+          nameEnd,
+          end,
+        )
+      ) {
+        return { kind: "ambiguous" };
+      }
       if (value[cursor] === "\\") {
         const malformed = scanMalformedBareKeyCandidate(
           value,
@@ -794,12 +1795,17 @@ function scanBareAssignmentsInRange(
       if (!hasAssignmentValueBoundary(value, quotedValue.end)) {
         return { kind: "ambiguous" };
       }
+      protectedQuotedSegments?.add(quotedValue.start);
       markRedaction(
         mask,
         quotedValue.contentStart,
         quotedValue.contentEnd,
       );
       index = quotedValue.end;
+      continue;
+    }
+    if (onlyQuotedValues) {
+      index = nameEnd;
       continue;
     }
 
@@ -834,6 +1840,8 @@ function scanBareAssignments(
   value: string,
   lexed: LexedText,
   mask: Int32Array,
+  onlyQuotedValues = false,
+  protectedQuotedSegments?: Set<number>,
 ): ScanOutcome {
   let bareStart = 0;
   for (const segment of lexed.segments) {
@@ -844,20 +1852,26 @@ function scanBareAssignments(
       false,
       lexed,
       mask,
+      onlyQuotedValues,
+      protectedQuotedSegments,
     );
     if (bare.kind === "ambiguous") {
       return bare;
     }
-    const content = scanBareAssignmentsInRange(
-      value,
-      segment.contentStart,
-      segment.contentEnd,
-      true,
-      lexed,
-      mask,
-    );
-    if (content.kind === "ambiguous") {
-      return content;
+    if (protectedQuotedSegments?.has(segment.start) !== true) {
+      const content = scanBareAssignmentsInRange(
+        value,
+        segment.contentStart,
+        segment.contentEnd,
+        true,
+        lexed,
+        mask,
+        onlyQuotedValues,
+        protectedQuotedSegments,
+      );
+      if (content.kind === "ambiguous") {
+        return content;
+      }
     }
     bareStart = segment.end;
   }
@@ -868,6 +1882,8 @@ function scanBareAssignments(
     true,
     lexed,
     mask,
+    onlyQuotedValues,
+    protectedQuotedSegments,
   );
 }
 
@@ -1009,7 +2025,7 @@ function scanTokenPatterns(
   );
 }
 
-export function redactText(value: string): string {
+function redactTextWithoutOutputBound(value: string): string {
   if (
     typeof value !== "string" ||
     value.length > MAX_PERSISTED_TEXT_INPUT_CHARACTERS
@@ -1017,20 +2033,88 @@ export function redactText(value: string): string {
     throw persistenceError("INVALID_PERSISTENCE_INPUT");
   }
 
-  const bearerProtected = redactBearerTokens(value);
-  const normalized = bearerProtected.replace(
+  const sourceLexical = lexText(value);
+  if (sourceLexical.kind === "ambiguous") {
+    return REDACTED_VALUE;
+  }
+
+  const sourceAssignmentMask = createRedactionMask(value.length);
+  const protectedSourceSegments = new Set<number>();
+  const sourceQuotedAssignments = scanQuotedSensitiveAssignments(
+    value,
+    sourceLexical.lexed,
+    sourceAssignmentMask,
+    protectedSourceSegments,
+  );
+  if (sourceQuotedAssignments.kind === "ambiguous") {
+    return REDACTED_VALUE;
+  }
+  const sourceBareAssignments = scanBareAssignments(
+    value,
+    sourceLexical.lexed,
+    sourceAssignmentMask,
+    true,
+    protectedSourceSegments,
+  );
+  if (sourceBareAssignments.kind === "ambiguous") {
+    return REDACTED_VALUE;
+  }
+  const sourceProtectedPositions = maskedPositions(
+    sourceAssignmentMask,
+  );
+  const assignmentProtectedValue = applyRedactionMask(
+    value,
+    sourceAssignmentMask,
+  );
+  const protectedCandidateBaseline =
+    protectedSensitiveCandidateBaseline(
+      value,
+      sourceLexical.lexed,
+      sourceProtectedPositions,
+      assignmentProtectedValue,
+    );
+  if (
+    hasUnmappableDecodedSensitiveCandidate(
+      value,
+      sourceLexical.lexed.segments,
+      sourceProtectedPositions,
+    ) ||
+    hasAmbiguousRejoinedSensitiveCandidate(
+      value,
+      sourceLexical.lexed,
+      sourceProtectedPositions,
+      protectedCandidateBaseline,
+    ) ||
+    hasAmbiguousProjectedSensitiveCandidate(
+      assignmentProtectedValue,
+      protectedCandidateBaseline,
+    )
+  ) {
+    return REDACTED_VALUE;
+  }
+
+  const bearerProtected = redactBearerTokens(
+    assignmentProtectedValue,
+  );
+  if (bearerProtected.kind === "ambiguous") {
+    return REDACTED_VALUE;
+  }
+  const normalized = bearerProtected.value.replace(
     CONTROL_OR_FORMAT_CHARACTERS_PATTERN,
     "",
   );
   const bearerRedacted = redactBearerTokens(normalized);
-  const lexical = lexText(bearerRedacted);
+  if (bearerRedacted.kind === "ambiguous") {
+    return REDACTED_VALUE;
+  }
+  const lexical = lexText(bearerRedacted.value);
   if (lexical.kind === "ambiguous") {
     return REDACTED_VALUE;
   }
 
-  const mask = createRedactionMask(bearerRedacted.length);
+  const mask = createRedactionMask(bearerRedacted.value.length);
   const quotedAssignments = scanQuotedSensitiveAssignments(
-    bearerRedacted,
+    bearerRedacted.value,
     lexical.lexed,
     mask,
   );
@@ -1038,7 +2122,7 @@ export function redactText(value: string): string {
     return REDACTED_VALUE;
   }
   const bareAssignments = scanBareAssignments(
-    bearerRedacted,
+    bearerRedacted.value,
     lexical.lexed,
     mask,
   );
@@ -1046,14 +2130,26 @@ export function redactText(value: string): string {
     return REDACTED_VALUE;
   }
   scanTokenPatterns(
-    bearerRedacted,
+    bearerRedacted.value,
     lexical.lexed,
     mask,
     maskedPositions(mask),
   );
 
-  return applyRedactionMask(bearerRedacted, mask).slice(
+  return applyRedactionMask(bearerRedacted.value, mask);
+}
+
+export function redactText(value: string): string {
+  const redacted = redactTextWithoutOutputBound(value);
+  if (redacted.length <= MAX_PERSISTED_SUMMARY_CHARACTERS) {
+    return redacted;
+  }
+
+  const truncated = redacted.slice(
     0,
     MAX_PERSISTED_SUMMARY_CHARACTERS,
   );
+  return redactTextWithoutOutputBound(truncated) === truncated
+    ? truncated
+    : REDACTED_VALUE;
 }

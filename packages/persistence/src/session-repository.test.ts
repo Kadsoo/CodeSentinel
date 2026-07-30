@@ -2256,6 +2256,23 @@ describe("session event persistence", () => {
     });
   });
 
+  it("can read back its own truncated quoted-safe summary", async () => {
+    await withRepository(async (repository) => {
+      await repository.createSession(validSession());
+      const summary = `"${"ordinary text ".repeat(500)}"`;
+
+      await repository.append(
+        stateEvent(0, at(1), "running", summary),
+      );
+
+      await expect(
+        repository.loadTimeline(SESSION_ID),
+      ).resolves.toEqual([
+        stateEvent(0, at(1), "running", "[REDACTED]"),
+      ]);
+    });
+  });
+
   it("redacts a secret summary before persistence and return", async () => {
     await withRepository(async (repository) => {
       await repository.createSession(validSession());
@@ -3149,9 +3166,29 @@ describe("session event persistence", () => {
       verification: "sk-proj-verification-summary-sentinel-2004",
       memory: "sk-proj-memory-summary-sentinel-2005",
     } as const;
+    const encodedActionPrefix = prefixedSentinels.action.replace(
+      "sk-",
+      "sk\\u002d",
+    );
+    const decodedLongToken = "A".repeat(32);
+    const encodedLongToken = `${"A".repeat(31)}\\u0041`;
+    const decodedKnownExtension =
+      "sk-abcdefghijklZTOPSECRET-2007";
+    const encodedKnownExtensionTail =
+      "\\u005aTOPSECRET-2007";
+    const commentBearerSentinel =
+      "gap-token-2006";
     const sentinels = [
       ...Object.values(quotedSuffixes),
       ...Object.values(prefixedSentinels),
+      decodedLongToken,
+      decodedKnownExtension,
+      commentBearerSentinel,
+    ];
+    const serializedSentinels = [
+      encodedActionPrefix,
+      encodedLongToken,
+      encodedKnownExtensionTail,
     ];
     const deletedMarker =
       "deleted marker :: physical safety :: 2026-07-30 :: A9F4";
@@ -3188,8 +3225,9 @@ describe("session event persistence", () => {
         actionId,
         actionKind: "propose_patch",
         inputSummary:
-          `{"token":["${quotedSuffixes.action}",` +
-          `"${prefixedSentinels.action}"]}`,
+          `{"safe":"x\\" , \\"password\\":\\"` +
+          `${quotedSuffixes.action} ${encodedActionPrefix} ` +
+          `${encodedLongToken}"}`,
       });
       await repository.append(policyEvent(1, at(3), "ask"));
       await repository.append(
@@ -3208,7 +3246,7 @@ describe("session event persistence", () => {
         sessionId: SESSION_ID,
         round: 1,
         occurredAt: at(6),
-        summary: "approved",
+        summary: deletedMarker,
         details: { ...approvalDetails, status: "approved" },
       });
       await repository.append(
@@ -3224,8 +3262,9 @@ describe("session event persistence", () => {
         round: 1,
         occurredAt: at(8),
         summary:
-          `credential=front"${quotedSuffixes.verification} ` +
-          `${prefixedSentinels.verification}`,
+          `Bearer/*x*/${commentBearerSentinel} ` +
+          `${quotedSuffixes.verification} ` +
+          prefixedSentinels.verification,
         details: {
           commandId: "test-command",
           exitCode: 0,
@@ -3239,12 +3278,37 @@ describe("session event persistence", () => {
         summary:
           `{"secret":"front ${quotedSuffixes.memory}",` +
           `"note":"${prefixedSentinels.memory}",` +
-          `"safe":"${deletedMarker}"}`,
+          `"tail":"sk-abcdefghijkl${encodedKnownExtensionTail}"}`,
         updatedAt: at(9),
       });
 
+      const timeline = await repository.loadTimeline(SESSION_ID);
+      const actionSummary = timeline.find(
+        (event) =>
+          event.kind === "action" &&
+          event.details.actionId === actionId,
+      )?.summary;
+      const verificationSummary = timeline.find(
+        (event) => event.kind === "verification",
+      )?.summary;
+      const decodedActionSummary =
+        actionSummary === "[REDACTED]"
+          ? actionSummary
+          : JSON.parse(actionSummary ?? "{}").safe;
+      expect.soft(decodedActionSummary).not.toContain(
+        quotedSuffixes.action,
+      );
+      expect.soft(decodedActionSummary).not.toContain(
+        prefixedSentinels.action,
+      );
+      expect.soft(decodedActionSummary).not.toContain(
+        decodedLongToken,
+      );
+      expect.soft(actionSummary).toBe("[REDACTED]");
+      expect.soft(verificationSummary).toBe("[REDACTED]");
+
       const publicValues = JSON.stringify({
-        timeline: await repository.loadTimeline(SESSION_ID),
+        timeline,
         memory: await repository.loadSessionMemory(SESSION_ID),
       });
 
@@ -3261,7 +3325,10 @@ describe("session event persistence", () => {
           continue;
         }
         const bytes = await readFile(candidate);
-        for (const sentinel of sentinels) {
+        for (const sentinel of [
+          ...sentinels,
+          ...serializedSentinels,
+        ]) {
           expect(bytes.includes(Buffer.from(sentinel, "utf8"))).toBe(false);
         }
       }
@@ -3289,7 +3356,10 @@ describe("session event persistence", () => {
           continue;
         }
         const bytes = await readFile(candidate);
-        for (const sentinel of sentinels) {
+        for (const sentinel of [
+          ...sentinels,
+          ...serializedSentinels,
+        ]) {
           expect(bytes.includes(Buffer.from(sentinel, "utf8"))).toBe(false);
         }
         expect(

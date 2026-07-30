@@ -7,6 +7,12 @@ export class CodeSentinelPersistenceError extends Error {
     super(code);
     this.name = "CodeSentinelPersistenceError";
     this.code = code;
+    Object.defineProperty(this, "code", {
+      value: code,
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    });
   }
 }
 
