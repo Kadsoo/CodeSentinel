@@ -31,6 +31,8 @@ const KNOWN_KEY_FRAGMENT =
   /(?:sk-|sk_|pk_|rk_|ghp_)[A-Za-z0-9_-]{12,}/iu;
 const SHA_256 = /^[0-9a-f]{64}$/u;
 const MAX_DATE_TIMESTAMP = 8_640_000_000_000_000;
+const APPROVAL_EXPIRED_ON_RESTART = "APPROVAL_EXPIRED_ON_RESTART";
+const SESSION_INTERRUPTED = "SESSION_INTERRUPTED";
 
 const EVENT_KEYS = Object.freeze([
   "sessionId",
@@ -140,6 +142,11 @@ type VerificationRecord = Readonly<{
   status: VerificationStatus;
   timedOut: boolean;
   summary: string;
+}>;
+
+type RecoveryTime = Readonly<{
+  epoch: number;
+  iso: string;
 }>;
 
 type TimelineInsertParameters = Readonly<{
@@ -326,6 +333,26 @@ function assertApprovalTimestamp(value: unknown): asserts value is number {
     value < -MAX_DATE_TIMESTAMP ||
     value > MAX_DATE_TIMESTAMP
   ) {
+    throw persistenceError("INVALID_PERSISTENCE_INPUT");
+  }
+}
+
+function validatedRecoveryTime(value: unknown): RecoveryTime {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < -MAX_DATE_TIMESTAMP ||
+    value > MAX_DATE_TIMESTAMP
+  ) {
+    throw persistenceError("INVALID_PERSISTENCE_INPUT");
+  }
+  try {
+    const iso = new Date(value).toISOString();
+    if (Date.parse(iso) !== value) {
+      throw persistenceError("INVALID_PERSISTENCE_INPUT");
+    }
+    return Object.freeze({ epoch: value, iso });
+  } catch {
     throw persistenceError("INVALID_PERSISTENCE_INPUT");
   }
 }
@@ -1423,6 +1450,31 @@ function approvalMetadataEqual(
   );
 }
 
+function validateRecoveryApprovalExpiration(
+  event: HarnessEvent,
+  session: PersistedSession,
+  approval: ApprovalRecord,
+): asserts event is Extract<HarnessEvent, { kind: "approval" }> {
+  const eventTimestamp = canonicalEpoch(event.occurredAt);
+  const sessionTimestamp = canonicalEpoch(session.updatedAt);
+  if (
+    event.kind !== "approval" ||
+    event.summary !== APPROVAL_EXPIRED_ON_RESTART ||
+    event.details.status !== "expired" ||
+    event.sessionId !== session.id ||
+    event.round !== session.round ||
+    TERMINAL_STATES.has(session.state) ||
+    approval.status !== "pending" ||
+    approval.sessionId !== session.id ||
+    !approvalMetadataEqual(approval, event) ||
+    eventTimestamp === undefined ||
+    sessionTimestamp === undefined ||
+    eventTimestamp < sessionTimestamp
+  ) {
+    throw persistenceError("PERSISTENCE_FAILED");
+  }
+}
+
 function expectedSessionAfterEvent(
   session: PersistedSession,
   event: HarnessEvent,
@@ -1531,6 +1583,34 @@ export function createSessionRepository(databasePath: string): SessionRepository
       FROM sessions
       WHERE id = ?
     `);
+    const selectInterruptedSessions = database.prepare(`
+      SELECT
+        id,
+        task_kind,
+        state,
+        round,
+        workspace_id,
+        provider_id,
+        verification_command_id,
+        created_at,
+        updated_at
+      FROM sessions
+      WHERE state IN ('created', 'running', 'awaiting_approval')
+      ORDER BY id ASC
+    `);
+    const deleteSession = database.prepare(`
+      DELETE FROM sessions
+      WHERE id = ?
+    `);
+    const selectTargetRowCounts = database.prepare(`
+      SELECT
+        (SELECT count(*) FROM sessions WHERE id = ?) AS sessions,
+        (SELECT count(*) FROM timeline_events WHERE session_id = ?) AS timeline_events,
+        (SELECT count(*) FROM action_records WHERE session_id = ?) AS action_records,
+        (SELECT count(*) FROM approvals WHERE session_id = ?) AS approvals,
+        (SELECT count(*) FROM verification_runs WHERE session_id = ?) AS verification_runs,
+        (SELECT count(*) FROM session_memory WHERE session_id = ?) AS session_memory
+    `);
     const selectSessionMemory = database.prepare(`
       SELECT
         session_id,
@@ -1595,6 +1675,20 @@ export function createSessionRepository(databasePath: string): SessionRepository
         expires_at
       FROM approvals
       WHERE action_id = ?
+    `);
+    const selectPendingApprovalsForSession = database.prepare(`
+      SELECT
+        id,
+        session_id,
+        action_id,
+        patch_hash,
+        base_hash,
+        status,
+        created_at,
+        expires_at
+      FROM approvals
+      WHERE session_id = ? AND status = 'pending'
+      ORDER BY id ASC
     `);
     const selectApprovedApproval = database.prepare(`
       SELECT
@@ -2086,7 +2180,10 @@ export function createSessionRepository(databasePath: string): SessionRepository
         }
       },
     );
-    const appendTransaction = database.transaction((event: HarnessEvent): void => {
+    function appendEventWithinTransaction(
+      event: HarnessEvent,
+      recoveryApproval?: ApprovalRecord,
+    ): void {
       const sessionRow = selectSession.get(event.sessionId);
       if (sessionRow === undefined) {
         throw persistenceError("SESSION_NOT_FOUND");
@@ -2103,7 +2200,15 @@ export function createSessionRepository(databasePath: string): SessionRepository
       ) {
         throw persistenceError("DUPLICATE_RECORD");
       }
-      validateEventSequence(event, session);
+      if (recoveryApproval === undefined) {
+        validateEventSequence(event, session);
+      } else {
+        validateRecoveryApprovalExpiration(
+          event,
+          session,
+          recoveryApproval,
+        );
+      }
 
       const actionRowBefore = selectActionForRound.get(
         event.sessionId,
@@ -2119,6 +2224,7 @@ export function createSessionRepository(databasePath: string): SessionRepository
             );
       const action = actionBefore;
       if (
+        recoveryApproval === undefined &&
         action === undefined &&
         (event.kind === "policy" ||
           event.kind === "tool_result" ||
@@ -2147,55 +2253,66 @@ export function createSessionRepository(databasePath: string): SessionRepository
           throw persistenceError("INVALID_EVENT_SEQUENCE");
         }
       } else if (event.kind === "approval") {
-        if (action === undefined) {
-          throw persistenceError("INVALID_EVENT_SEQUENCE");
-        }
-        if (
-          action.actionId !== event.details.actionId ||
-          action.actionKind !== "propose_patch" ||
-          action.policyDecision !== "ask"
-        ) {
-          throw persistenceError("INVALID_EVENT_SEQUENCE");
-        }
         const approvalByIdRow = selectApprovalById.get(
           event.details.approvalId,
-        );
-        const approvalForActionRow = selectApprovalForAction.get(
-          action.actionId,
         );
         const approvalById =
           approvalByIdRow === undefined
             ? undefined
             : mapApprovalRecordRow(approvalByIdRow);
-        const approvalForAction =
-          approvalForActionRow === undefined
-            ? undefined
-            : mapApprovalRecordRow(approvalForActionRow);
-
-        if (event.details.status === "pending") {
-          if (
-            approvalForAction !== undefined &&
-            approvalForAction.status !== "pending"
-          ) {
-            throw persistenceError("INVALID_EVENT_SEQUENCE");
-          }
-          if (approvalById !== undefined || approvalForAction !== undefined) {
-            throw persistenceError("DUPLICATE_RECORD");
-          }
-        } else {
+        if (recoveryApproval !== undefined) {
           if (
             approvalById === undefined ||
-            approvalForAction === undefined ||
-            approvalById.approvalId !== approvalForAction.approvalId ||
+            approvalById.status !== "pending" ||
+            !approvalRecordsEqual(approvalById, recoveryApproval) ||
             !approvalMetadataEqual(approvalById, event)
+          ) {
+            throw persistenceError("PERSISTENCE_FAILED");
+          }
+        } else {
+          if (action === undefined) {
+            throw persistenceError("INVALID_EVENT_SEQUENCE");
+          }
+          if (
+            action.actionId !== event.details.actionId ||
+            action.actionKind !== "propose_patch" ||
+            action.policyDecision !== "ask"
           ) {
             throw persistenceError("INVALID_EVENT_SEQUENCE");
           }
-          if (approvalById.status === event.details.status) {
-            throw persistenceError("DUPLICATE_RECORD");
-          }
-          if (approvalById.status !== "pending") {
-            throw persistenceError("INVALID_EVENT_SEQUENCE");
+          const approvalForActionRow = selectApprovalForAction.get(
+            action.actionId,
+          );
+          const approvalForAction =
+            approvalForActionRow === undefined
+              ? undefined
+              : mapApprovalRecordRow(approvalForActionRow);
+
+          if (event.details.status === "pending") {
+            if (
+              approvalForAction !== undefined &&
+              approvalForAction.status !== "pending"
+            ) {
+              throw persistenceError("INVALID_EVENT_SEQUENCE");
+            }
+            if (approvalById !== undefined || approvalForAction !== undefined) {
+              throw persistenceError("DUPLICATE_RECORD");
+            }
+          } else {
+            if (
+              approvalById === undefined ||
+              approvalForAction === undefined ||
+              approvalById.approvalId !== approvalForAction.approvalId ||
+              !approvalMetadataEqual(approvalById, event)
+            ) {
+              throw persistenceError("INVALID_EVENT_SEQUENCE");
+            }
+            if (approvalById.status === event.details.status) {
+              throw persistenceError("DUPLICATE_RECORD");
+            }
+            if (approvalById.status !== "pending") {
+              throw persistenceError("INVALID_EVENT_SEQUENCE");
+            }
           }
         }
       } else if (event.kind === "verification" && event.round > 0) {
@@ -2516,7 +2633,111 @@ export function createSessionRepository(databasePath: string): SessionRepository
           throw persistenceError("PERSISTENCE_FAILED");
         }
       }
-    });
+    }
+    const appendTransaction = database.transaction(
+      (event: HarnessEvent): void => {
+        appendEventWithinTransaction(event);
+      },
+    );
+    const clearSessionTransaction = database.transaction(
+      (sessionId: string): void => {
+        const changes = deleteSession.run(sessionId).changes;
+        if (changes !== 0 && changes !== 1) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const row = selectTargetRowCounts.get(
+          sessionId,
+          sessionId,
+          sessionId,
+          sessionId,
+          sessionId,
+          sessionId,
+        );
+        if (typeof row !== "object" || row === null) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const counts = row as Readonly<Record<string, unknown>>;
+        if (
+          counts.sessions !== 0 ||
+          counts.timeline_events !== 0 ||
+          counts.action_records !== 0 ||
+          counts.approvals !== 0 ||
+          counts.verification_runs !== 0 ||
+          counts.session_memory !== 0
+        ) {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+      },
+    );
+    const recoverInterruptedSessionsTransaction = database.transaction(
+      (now: RecoveryTime): number => {
+        const candidates = selectInterruptedSessions.all().map((row) => {
+          if (typeof row !== "object" || row === null) {
+            throw persistenceError("PERSISTENCE_FAILED");
+          }
+          const id = (row as Readonly<Record<string, unknown>>).id;
+          if (typeof id !== "string") {
+            throw persistenceError("PERSISTENCE_FAILED");
+          }
+          try {
+            return mapSessionRow(row, id);
+          } catch {
+            throw persistenceError("PERSISTENCE_FAILED");
+          }
+        });
+
+        for (const session of candidates) {
+          const updatedAt = canonicalEpoch(session.updatedAt);
+          if (updatedAt === undefined) {
+            throw persistenceError("PERSISTENCE_FAILED");
+          }
+          if (now.epoch < updatedAt) {
+            throw persistenceError("INVALID_PERSISTENCE_INPUT");
+          }
+        }
+
+        for (const session of candidates) {
+          const approvals = selectPendingApprovalsForSession
+            .all(session.id)
+            .map((row) => mapApprovalRecordRow(row));
+          for (const approval of approvals) {
+            if (
+              approval.sessionId !== session.id ||
+              approval.status !== "pending"
+            ) {
+              throw persistenceError("PERSISTENCE_FAILED");
+            }
+            const event = validateAndRedactEvent({
+              sessionId: session.id,
+              round: session.round,
+              kind: "approval",
+              summary: APPROVAL_EXPIRED_ON_RESTART,
+              occurredAt: now.iso,
+              details: {
+                approvalId: approval.approvalId,
+                actionId: approval.actionId,
+                patchHash: approval.patchHash,
+                baseHash: approval.baseHash,
+                status: "expired",
+                createdAt: approval.createdAt,
+                expiresAt: approval.expiresAt,
+              },
+            });
+            appendEventWithinTransaction(event, approval);
+          }
+          const event = validateAndRedactEvent({
+            sessionId: session.id,
+            round: session.round,
+            kind: "state",
+            summary: SESSION_INTERRUPTED,
+            occurredAt: now.iso,
+            details: { state: "stopped" },
+          });
+          appendEventWithinTransaction(event);
+        }
+        return candidates.length;
+      },
+    );
     let closed = false;
     let mutationInProgress = false;
 
@@ -2686,14 +2907,38 @@ export function createSessionRepository(databasePath: string): SessionRepository
 
     async function recoverInterruptedSessions(now: number): Promise<number> {
       assertOpen();
-      void now;
-      throw persistenceError("PERSISTENCE_FAILED");
+      beginMutation();
+      try {
+        const validated = validatedRecoveryTime(now);
+        try {
+          return recoverInterruptedSessionsTransaction.immediate(validated);
+        } catch (error) {
+          if (isPersistenceError(error)) {
+            throw error;
+          }
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+      } finally {
+        endMutation();
+      }
     }
 
     async function clearSession(sessionId: string): Promise<void> {
       assertOpen();
-      void sessionId;
-      throw persistenceError("PERSISTENCE_FAILED");
+      beginMutation();
+      try {
+        assertIdentifier(sessionId);
+        try {
+          clearSessionTransaction.immediate(sessionId);
+        } catch (error) {
+          if (isPersistenceError(error)) {
+            throw error;
+          }
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+      } finally {
+        endMutation();
+      }
     }
 
     function close(): void {
