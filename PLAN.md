@@ -522,58 +522,18 @@ git commit -m "feat: add provider and credential abstractions"
 
 ### Task 9: Persist sessions and redact stored output
 
-**Dependencies:** Task 2.
+**Dependencies:** Tasks 2 and 8.
 
-**Files:**
-- Create: packages/persistence/package.json
-- Create: packages/persistence/src/redaction.ts
-- Create: packages/persistence/src/session-repository.ts
-- Create: packages/persistence/src/redaction.test.ts
-- Create: packages/persistence/src/session-repository.test.ts
-- Create: packages/persistence/src/index.ts
+**Status:** Design approved; detailed implementation plan awaiting owner review.
 
-- [ ] **Step 1: Write failing redaction and repository tests**
+**Authoritative documents:**
 
-~~~ts
-import { expect, it } from "vitest";
-import { redactText } from "./redaction.js";
-import { createSessionRepository } from "./session-repository.js";
+- Design: `docs/superpowers/specs/2026-07-30-task9-redacted-persistence-design.md`
+- Implementation plan: `docs/superpowers/plans/2026-07-30-task9-redacted-persistence.md`
 
-it("redacts an API-key-like value before persistence", () => {
-  expect(redactText("Authorization: Bearer sk-1234567890abcdef")).not.toContain("sk-1234567890abcdef");
-});
+**Approved scope:** Extend the Harness event contract with non-secret structured facts, make Core emit stable action/Policy/tool/verification/state/approval metadata, and add a hardened `better-sqlite3` repository for sessions, ordered timeline events, action records, approval metadata, verification runs and bounded session memory. Every public text path is redacted before persistence; clear is session-scoped and uses secure delete; explicit restart recovery stops nonterminal sessions and expires pending approvals without persisting or restoring raw patches.
 
-it("clears every persisted record for one session", async () => {
-  const repository = createSessionRepository(":memory:");
-  await repository.createSession({ id: "s1", taskKind: "test_repair", state: "created", round: 0, workspaceId: "w1", providerId: "p1" });
-  await repository.appendAction({ sessionId: "s1", kind: "finish", inputSummary: "done", policyDecision: "allow", resultSummary: "done" });
-  await repository.clearSession("s1");
-  await expect(repository.loadTimeline("s1")).resolves.toEqual([]);
-});
-~~~
-
-- [ ] **Step 2: Run persistence tests to record red**
-
-Run: npm test -- --run packages/persistence/src/redaction.test.ts packages/persistence/src/session-repository.test.ts
-Expected: FAIL because redaction and repository modules are missing.
-
-- [ ] **Step 3: Implement local-only persistence**
-
-Create SQLite tables for sessions, action records, approvals, verification runs and session memory. Persist only redacted summaries, never Provider API keys. Make SessionRepository implement EventSink by translating appended events into redacted action or verification records. Expose createSession, appendAction, saveApproval, appendVerification, loadTimeline and clearSession. Make clearSession remove all records associated with one session.
-
-- [ ] **Step 4: Verify persistence**
-
-Run: npm test -- --run packages/persistence/src/redaction.test.ts packages/persistence/src/session-repository.test.ts
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-Run:
-
-~~~bash
-git add packages/persistence
-git commit -m "feat: persist redacted local session history"
-~~~
+The detailed plan supersedes the earlier compound `appendAction` sketch. Execution must use its nine TDD tasks, independent specification and security reviews, full verification, and final evidence update.
 
 ### Task 10: Expose the local Fastify API and CLI
 
