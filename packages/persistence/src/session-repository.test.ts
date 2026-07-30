@@ -3135,13 +3135,24 @@ describe("session event persistence", () => {
   it("keeps every public text ingress secret out of file bytes and securely removes a marker", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codesentinel-physical-safety-"));
     const databasePath = join(directory, "sessions.sqlite");
-    const sentinels = {
+    const quotedSuffixes = {
+      append: "append suffix,segment;2001",
+      action: "action suffix,segment;2002",
+      approval: "approval suffix,segment;2003",
+      verification: "verification suffix,segment;2004",
+      memory: "memory suffix,segment;2005",
+    } as const;
+    const prefixedSentinels = {
       append: "sk-proj-append-summary-sentinel-2001",
       action: "sk-proj-action-summary-sentinel-2002",
       approval: "sk-proj-approval-summary-sentinel-2003",
       verification: "sk-proj-verification-summary-sentinel-2004",
       memory: "sk-proj-memory-summary-sentinel-2005",
     } as const;
+    const sentinels = [
+      ...Object.values(quotedSuffixes),
+      ...Object.values(prefixedSentinels),
+    ];
     const deletedMarker =
       "deleted marker :: physical safety :: 2026-07-30 :: A9F4";
     const actionId = "physical-action-1";
@@ -3166,7 +3177,8 @@ describe("session event persistence", () => {
           0,
           at(1),
           "running",
-          `running ${sentinels.append}`,
+          `{"password":"front""${quotedSuffixes.append}",` +
+            `"note":"${prefixedSentinels.append}"}`,
         ),
       );
       await repository.appendAction({
@@ -3175,7 +3187,9 @@ describe("session event persistence", () => {
         occurredAt: at(2),
         actionId,
         actionKind: "propose_patch",
-        inputSummary: `proposal ${sentinels.action}`,
+        inputSummary:
+          `{"token":["${quotedSuffixes.action}",` +
+          `"${prefixedSentinels.action}"]}`,
       });
       await repository.append(policyEvent(1, at(3), "ask"));
       await repository.append(
@@ -3185,7 +3199,9 @@ describe("session event persistence", () => {
         sessionId: SESSION_ID,
         round: 1,
         occurredAt: at(5),
-        summary: `pending ${sentinels.approval}`,
+        summary:
+          `{"passw\\ord":"${quotedSuffixes.approval} ` +
+          `${prefixedSentinels.approval}"}`,
         details: approvalDetails,
       });
       await repository.saveApproval({
@@ -3207,7 +3223,9 @@ describe("session event persistence", () => {
         sessionId: SESSION_ID,
         round: 1,
         occurredAt: at(8),
-        summary: `passed ${sentinels.verification}`,
+        summary:
+          `credential=front"${quotedSuffixes.verification} ` +
+          `${prefixedSentinels.verification}`,
         details: {
           commandId: "test-command",
           exitCode: 0,
@@ -3218,7 +3236,10 @@ describe("session event persistence", () => {
       });
       await repository.saveSessionMemory({
         sessionId: SESSION_ID,
-        summary: `memory ${sentinels.memory} ${deletedMarker}`,
+        summary:
+          `{"secret":"front ${quotedSuffixes.memory}",` +
+          `"note":"${prefixedSentinels.memory}",` +
+          `"safe":"${deletedMarker}"}`,
         updatedAt: at(9),
       });
 
@@ -3226,20 +3247,29 @@ describe("session event persistence", () => {
         timeline: await repository.loadTimeline(SESSION_ID),
         memory: await repository.loadSessionMemory(SESSION_ID),
       });
-      for (const sentinel of Object.values(sentinels)) {
-        expect(publicValues).not.toContain(sentinel);
-      }
-      expect(publicValues).toContain(deletedMarker);
 
       repository.close();
       repository = undefined;
 
-      const storedBytes = await readFile(databasePath);
-      for (const sentinel of Object.values(sentinels)) {
-        expect(storedBytes.includes(Buffer.from(sentinel, "utf8"))).toBe(
-          false,
-        );
+      for (const candidate of [
+        databasePath,
+        `${databasePath}-journal`,
+        `${databasePath}-wal`,
+        `${databasePath}-shm`,
+      ]) {
+        if (!existsSync(candidate)) {
+          continue;
+        }
+        const bytes = await readFile(candidate);
+        for (const sentinel of sentinels) {
+          expect(bytes.includes(Buffer.from(sentinel, "utf8"))).toBe(false);
+        }
       }
+      for (const sentinel of sentinels) {
+        expect(publicValues).not.toContain(sentinel);
+      }
+      expect(publicValues).toContain(deletedMarker);
+      const storedBytes = await readFile(databasePath);
       expect(
         storedBytes.includes(Buffer.from(deletedMarker, "utf8")),
       ).toBe(true);
@@ -3259,7 +3289,7 @@ describe("session event persistence", () => {
           continue;
         }
         const bytes = await readFile(candidate);
-        for (const sentinel of Object.values(sentinels)) {
+        for (const sentinel of sentinels) {
           expect(bytes.includes(Buffer.from(sentinel, "utf8"))).toBe(false);
         }
         expect(
