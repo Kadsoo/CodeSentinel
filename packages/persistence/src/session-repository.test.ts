@@ -2143,6 +2143,70 @@ describe("session event persistence", () => {
     });
   });
 
+  it("rolls back memory when an AFTER trigger mutates existing timeline content", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await createRunningSession(repository);
+      const businessBefore = businessSnapshot(databasePath);
+      const sessionBefore = await repository.loadSession(SESSION_ID);
+      const timelineBefore = await repository.loadTimeline(SESSION_ID);
+      inspectDatabase(databasePath, (database) => {
+        database.exec(`
+          CREATE TRIGGER corrupt_timeline_from_memory
+          AFTER INSERT ON session_memory
+          BEGIN
+            UPDATE timeline_events
+            SET summary = 'tampered timeline'
+            WHERE session_id = NEW.session_id;
+          END
+        `);
+      });
+
+      await expectRejected(
+        repository.saveSessionMemory(saveMemoryInput()),
+        "PERSISTENCE_FAILED",
+      );
+      await expect(
+        repository.loadSessionMemory(SESSION_ID),
+      ).resolves.toBeUndefined();
+      expect(await repository.loadSession(SESSION_ID)).toEqual(
+        sessionBefore,
+      );
+      expect(await repository.loadTimeline(SESSION_ID)).toEqual(
+        timelineBefore,
+      );
+      expect(businessSnapshot(databasePath)).toEqual(businessBefore);
+    });
+  });
+
+  it("maps a corrupted owning session to PERSISTENCE_FAILED on memory save", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await repository.createSession(validSession());
+      inspectDatabase(databasePath, (database) => {
+        database
+          .prepare("UPDATE sessions SET workspace_id = ? WHERE id = ?")
+          .run(`workspace ${SENTINEL}`, SESSION_ID);
+      });
+      const businessBefore = businessSnapshot(databasePath);
+
+      const error = await expectRejected(
+        repository.saveSessionMemory(saveMemoryInput()),
+        "PERSISTENCE_FAILED",
+      );
+      expect(visibleErrorText(error)).not.toContain(SENTINEL);
+      await expect(
+        repository.loadSessionMemory(SESSION_ID),
+      ).resolves.toBeUndefined();
+      expect(businessSnapshot(databasePath)).toEqual(businessBefore);
+      expect(
+        inspectDatabase(databasePath, (database) =>
+          database
+            .prepare("SELECT count(*) AS count FROM session_memory")
+            .get(),
+        ),
+      ).toEqual({ count: 0 });
+    });
+  });
+
   it("rejects an oversized summary before writing", async () => {
     await withRepository(async (repository) => {
       await repository.createSession(validSession());

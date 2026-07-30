@@ -1285,6 +1285,22 @@ function eventsEqual(actual: HarnessEvent, expected: HarnessEvent): boolean {
   }
 }
 
+function timelinesEqual(
+  actual: readonly HarnessEvent[],
+  expected: readonly HarnessEvent[],
+): boolean {
+  return (
+    actual.length === expected.length &&
+    actual.every((event, index) => {
+      const expectedEvent = expected[index];
+      return (
+        expectedEvent !== undefined &&
+        eventsEqual(event, expectedEvent)
+      );
+    })
+  );
+}
+
 function sessionsEqual(
   actual: PersistedSession,
   expected: PersistedSession,
@@ -1935,7 +1951,12 @@ export function createSessionRepository(databasePath: string): SessionRepository
         if (sessionRow === undefined) {
           throw persistenceError("SESSION_NOT_FOUND");
         }
-        const sessionBefore = mapSessionRow(sessionRow, input.sessionId);
+        let sessionBefore: PersistedSession;
+        try {
+          sessionBefore = mapSessionRow(sessionRow, input.sessionId);
+        } catch {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
         const existingRow = selectSessionMemory.get(input.sessionId);
         const existing =
           existingRow === undefined
@@ -1969,8 +1990,12 @@ export function createSessionRepository(databasePath: string): SessionRepository
         const sessionTimelineCountBefore = storedCount(
           selectSessionTimelineCount.get(input.sessionId),
         );
+        const timelineBefore = selectTimeline
+          .all(input.sessionId)
+          .map((row) => mapTimelineRow(row, input.sessionId));
         if (
-          sessionCountBefore !== (existing === undefined ? 0 : 1)
+          sessionCountBefore !== (existing === undefined ? 0 : 1) ||
+          timelineBefore.length !== sessionTimelineCountBefore
         ) {
           throw persistenceError("PERSISTENCE_FAILED");
         }
@@ -2007,12 +2032,21 @@ export function createSessionRepository(databasePath: string): SessionRepository
         if (sessionAfterRow === undefined) {
           throw persistenceError("PERSISTENCE_FAILED");
         }
-        const sessionAfter = mapSessionRow(
-          sessionAfterRow,
-          input.sessionId,
-        );
+        let sessionAfter: PersistedSession;
+        try {
+          sessionAfter = mapSessionRow(
+            sessionAfterRow,
+            input.sessionId,
+          );
+        } catch {
+          throw persistenceError("PERSISTENCE_FAILED");
+        }
+        const timelineAfter = selectTimeline
+          .all(input.sessionId)
+          .map((row) => mapTimelineRow(row, input.sessionId));
         if (
           !sessionsEqual(sessionAfter, sessionBefore) ||
+          !timelinesEqual(timelineAfter, timelineBefore) ||
           storedCount(selectGlobalTimelineCount.get()) !==
             globalTimelineCountBefore ||
           storedCount(selectSessionTimelineCount.get(input.sessionId)) !==
