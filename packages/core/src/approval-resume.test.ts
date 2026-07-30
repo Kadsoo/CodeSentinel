@@ -136,6 +136,16 @@ describe("AgentSessionController trusted approval resume", () => {
       "verification",
       "state",
     ]);
+    const actionEvent = eventSink.events.find((event) => event.kind === "action");
+    const pendingApprovalEvent = eventSink.events.find(
+      (event) => event.kind === "approval" && event.details.status === "pending",
+    );
+    const actionId = actionEvent?.kind === "action" ? actionEvent.details.actionId : undefined;
+    const approvedActionId =
+      pendingApprovalEvent?.kind === "approval"
+        ? pendingApprovalEvent.details.actionId
+        : undefined;
+    expect(approvedActionId).toBe(actionId);
   });
 
   it("stops a rejection and consumes the approval so it cannot be replayed", async () => {

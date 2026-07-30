@@ -44,7 +44,7 @@ describe("PendingPatchStore", () => {
       action: patch("src/second.ts"),
     });
 
-    expect(store.getView("session\u0000approval", first.approvalId)).toMatchObject({
+    expect(store.getView("session\u0000approval", first.view.approvalId)).toMatchObject({
       path: "src/first.ts",
     });
   });

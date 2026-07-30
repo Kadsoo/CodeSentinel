@@ -1,13 +1,23 @@
-import { ActionSchema, type Action, type HarnessEvent } from "../../contracts/src/index.js";
+import {
+  ActionSchema,
+  type Action,
+  type HarnessEvent,
+  type HarnessEventPayload,
+} from "../../contracts/src/index.js";
 import {
   approvePatch,
   rejectPatch,
+  type Approval,
   type GuardrailDecision,
 } from "../../policy/src/index.js";
 import { MAX_PATCH_BYTES } from "../../tools/src/index.js";
 import { buildProviderRequest, sanitizeProviderFeedback, type ProviderFeedback } from "./context.js";
 import { CodeSentinelCoreError } from "./errors.js";
-import { PENDING_PATCH_TTL_MS, PendingPatchStore } from "./pending-patch-store.js";
+import {
+  PENDING_PATCH_TTL_MS,
+  PendingPatchStore,
+  type PendingPatchRegistration,
+} from "./pending-patch-store.js";
 import type {
   AgentLoopDependencies,
   AgentSession,
@@ -36,7 +46,9 @@ type SafePolicyDecision = Readonly<{
 type VerificationObservation = Readonly<{
   commandId: string;
   exitCode: number | null;
+  durationMs: number;
   status: "completed" | "timed_out" | "spawn_failed" | "output_limit";
+  timedOut: boolean;
   summary: string;
 }>;
 
@@ -82,7 +94,7 @@ export function createAgentSessionController(
     }
 
     setState(record, "running");
-    if (!(await appendEvent(record, "state", "RUNNING"))) {
+    if (!(await appendEvent(record, stateEvent(record, "RUNNING")))) {
       return eventSinkFailure(record);
     }
     return runProviderFeedbackCycles(record);
@@ -135,16 +147,16 @@ export function createAgentSessionController(
         currentBaseHash === claimed.approval.baseHash
           ? "APPROVAL_EXPIRED"
           : "APPROVAL_BASE_CHANGED";
-      return stopResolvedApproval(record, summary);
+      return stopResolvedApproval(record, summary, approval);
     }
     if (approval.status === "rejected") {
-      return stopResolvedApproval(record, "APPROVAL_REJECTED");
+      return stopResolvedApproval(record, "APPROVAL_REJECTED", approval);
     }
     if (approval.status !== "approved") {
       return terminal(record, "failed", "TOOL_FAILED");
     }
 
-    if (!(await appendEvent(record, "approval", "APPROVAL_APPROVED"))) {
+    if (!(await appendEvent(record, approvalEvent("APPROVAL_APPROVED", approval)))) {
       return eventSinkFailure(record);
     }
 
@@ -157,7 +169,13 @@ export function createAgentSessionController(
     } catch {
       return terminal(record, "failed", "TOOL_FAILED");
     }
-    if (!(await appendEvent(record, "tool_result", "PATCH_APPLIED"))) {
+    if (
+      !(await appendEvent(record, {
+        kind: "tool_result",
+        summary: "PATCH_APPLIED",
+        details: Object.freeze({ toolKind: "apply_approved_patch" }),
+      }))
+    ) {
       return eventSinkFailure(record);
     }
 
@@ -167,8 +185,9 @@ export function createAgentSessionController(
   async function stopResolvedApproval(
     record: SessionRecord,
     summary: "APPROVAL_REJECTED" | "APPROVAL_EXPIRED" | "APPROVAL_BASE_CHANGED",
+    approval: Approval,
   ): Promise<AgentSessionResult> {
-    if (!(await appendEvent(record, "approval", summary))) {
+    if (!(await appendEvent(record, approvalEvent(summary, approval)))) {
       return eventSinkFailure(record);
     }
     return terminal(record, "stopped", summary);
@@ -186,15 +205,13 @@ export function createAgentSessionController(
     }
 
     const verification = readVerification(value, record.session.verificationCommandId);
-    const summary = verification === undefined ? "TOOL_FAILED" : verification.summary;
-    if (!(await appendEvent(record, "verification", summary))) {
+    if (verification === undefined) {
+      return terminal(record, "failed", "TOOL_FAILED");
+    }
+    if (!(await appendEvent(record, verificationEvent(verification)))) {
       return eventSinkFailure(record);
     }
-    if (
-      verification === undefined ||
-      verification.status !== "completed" ||
-      verification.exitCode === null
-    ) {
+    if (verification.status !== "completed" || verification.exitCode === null) {
       return terminal(record, "failed", "TOOL_FAILED");
     }
 
@@ -240,7 +257,7 @@ export function createAgentSessionController(
     }
 
     setState(record, "running");
-    if (!(await appendEvent(record, "state", "RUNNING"))) {
+    if (!(await appendEvent(record, stateEvent(record, "RUNNING")))) {
       return eventSinkFailure(record);
     }
     return runProviderFeedbackCycles(record);
@@ -258,11 +275,13 @@ export function createAgentSessionController(
     }
 
     const verification = readVerification(value, record.session.verificationCommandId);
-    const summary = verification === undefined ? "TOOL_FAILED" : verification.summary;
-    if (!(await appendEvent(record, "verification", summary))) {
+    if (verification === undefined) {
+      return terminal(record, "failed", "TOOL_FAILED");
+    }
+    if (!(await appendEvent(record, verificationEvent(verification)))) {
       return eventSinkFailure(record);
     }
-    if (verification === undefined || verification.status !== "completed") {
+    if (verification.status !== "completed") {
       return terminal(record, "failed", "TOOL_FAILED");
     }
     if (verification.exitCode === 0) {
@@ -274,7 +293,7 @@ export function createAgentSessionController(
 
     record.feedback.push(Object.freeze({ kind: "verification", summary: verification.summary }));
     setState(record, "running");
-    if (!(await appendEvent(record, "state", "RUNNING"))) {
+    if (!(await appendEvent(record, stateEvent(record, "RUNNING")))) {
       return eventSinkFailure(record);
     }
     return runProviderFeedbackCycles(record);
@@ -313,7 +332,22 @@ export function createAgentSessionController(
 
       incrementRound(record);
       const action = parsed.data;
-      if (!(await appendEvent(record, "action", action.kind))) {
+      let actionId: string;
+      try {
+        actionId = dependencies.createId();
+      } catch {
+        return terminal(record, "failed", "TOOL_FAILED");
+      }
+      if (!isSafeGeneratedId(actionId)) {
+        return terminal(record, "failed", "TOOL_FAILED");
+      }
+      if (
+        !(await appendEvent(record, {
+          kind: "action",
+          summary: action.kind,
+          details: Object.freeze({ actionId, actionKind: action.kind }),
+        }))
+      ) {
         return eventSinkFailure(record);
       }
       if (action.kind === "propose_patch" && action.stage !== expectedStage) {
@@ -321,7 +355,13 @@ export function createAgentSessionController(
       }
 
       const policy = evaluatePolicy(action);
-      if (!(await appendEvent(record, "policy", policy.reason))) {
+      if (
+        !(await appendEvent(record, {
+          kind: "policy",
+          summary: policy.reason,
+          details: Object.freeze({ decision: policy.decision }),
+        }))
+      ) {
         return eventSinkFailure(record);
       }
       if (policy.decision === "deny") {
@@ -331,7 +371,7 @@ export function createAgentSessionController(
         if (action.kind !== "propose_patch") {
           return terminal(record, "blocked", "POLICY_DENIED");
         }
-        return createPendingPatch(record, action);
+        return createPendingPatch(record, action, actionId);
       }
       if (action.kind === "propose_patch" || action.kind === "apply_approved_patch") {
         return terminal(record, "blocked", "POLICY_DENIED");
@@ -366,6 +406,7 @@ export function createAgentSessionController(
   async function createPendingPatch(
     record: SessionRecord,
     action: Extract<Action, { kind: "propose_patch" }>,
+    actionId: string,
   ): Promise<AgentSessionResult> {
     if (!isPatchWithinByteLimit(action.patch)) {
       return terminal(record, "failed", "PATCH_TOO_LARGE");
@@ -374,10 +415,12 @@ export function createAgentSessionController(
       return terminal(record, "failed", "PENDING_CAPACITY_REACHED");
     }
 
-    let view: PendingPatchView;
+    let registration: PendingPatchRegistration;
     try {
-      const actionId = dependencies.createId();
       const approvalId = dependencies.createId();
+      if (!isSafeGeneratedId(approvalId)) {
+        return terminal(record, "failed", "TOOL_FAILED");
+      }
       const now = dependencies.now();
       if (!isSafeDateTimestamp(now)) {
         return terminalWithoutEvent(record, "failed", "TOOL_FAILED");
@@ -385,31 +428,36 @@ export function createAgentSessionController(
       if (!isValidPendingPatchTimestamp(now)) {
         return terminal(record, "failed", "TOOL_FAILED");
       }
-      view = pendingPatches.create({
+      registration = pendingPatches.create({
         sessionId: record.session.id,
         action,
         actionId,
         approvalId,
         now,
       });
-      record.pendingApprovalId = view.approvalId;
+      record.pendingApprovalId = registration.view.approvalId;
     } catch {
       return terminal(record, "failed", "TOOL_FAILED");
     }
 
     setState(record, "awaiting_approval");
-    if (!(await appendEvent(record, "state", "AWAITING_APPROVAL"))) {
-      pendingPatches.discard(record.session.id, view.approvalId);
+    if (!(await appendEvent(record, stateEvent(record, "AWAITING_APPROVAL")))) {
+      pendingPatches.discard(record.session.id, registration.view.approvalId);
       record.pendingApprovalId = undefined;
       return eventSinkFailure(record);
     }
-    if (!(await appendEvent(record, "approval", "APPROVAL_PENDING"))) {
-      pendingPatches.discard(record.session.id, view.approvalId);
+    if (
+      !(await appendEvent(
+        record,
+        approvalEvent("APPROVAL_PENDING", registration.approval),
+      ))
+    ) {
+      pendingPatches.discard(record.session.id, registration.view.approvalId);
       record.pendingApprovalId = undefined;
       return eventSinkFailure(record);
     }
 
-    return snapshot(record, "APPROVAL_PENDING", view);
+    return snapshot(record, "APPROVAL_PENDING", registration.view);
   }
 
   async function dispatchAction(record: SessionRecord, action: Exclude<Action, {
@@ -429,11 +477,13 @@ export function createAgentSessionController(
         return terminal(record, "failed", "TOOL_FAILED");
       }
       const verification = readVerification(value, action.commandId);
-      const summary = verification === undefined ? "TOOL_FAILED" : verification.summary;
-      if (!(await appendEvent(record, "verification", summary))) {
+      if (verification === undefined) {
+        return terminal(record, "failed", "TOOL_FAILED");
+      }
+      if (!(await appendEvent(record, verificationEvent(verification)))) {
         return eventSinkFailure(record);
       }
-      if (verification === undefined || verification.status !== "completed") {
+      if (verification.status !== "completed") {
         return terminal(record, "failed", "TOOL_FAILED");
       }
       if (verification.exitCode === 0) {
@@ -466,7 +516,13 @@ export function createAgentSessionController(
       if (feedbackSummary === undefined) {
         return terminal(record, "failed", "TOOL_FAILED");
       }
-      if (!(await appendEvent(record, "tool_result", action.kind))) {
+      if (
+        !(await appendEvent(record, {
+          kind: "tool_result",
+          summary: action.kind,
+          details: Object.freeze({ toolKind: action.kind }),
+        }))
+      ) {
         return eventSinkFailure(record);
       }
       record.feedback.push(Object.freeze({ kind: "tool_result", summary: feedbackSummary }));
@@ -501,7 +557,7 @@ export function createAgentSessionController(
     summary: string,
   ): Promise<AgentSessionResult> {
     setState(record, state);
-    if (!(await appendEvent(record, "state", summary))) {
+    if (!(await appendEvent(record, stateEvent(record, summary)))) {
       return eventSinkFailure(record);
     }
     const result = snapshot(record, summary);
@@ -550,23 +606,21 @@ export function createAgentSessionController(
 
   async function appendEvent(
     record: SessionRecord,
-    kind: HarnessEvent["kind"],
-    summary: string,
+    payload: HarnessEventPayload,
   ): Promise<boolean> {
     let event: HarnessEvent;
     try {
-      event = Object.freeze({
-        sessionId: record.session.id,
-        round: record.session.round,
-        kind,
-        summary,
-        occurredAt: new Date(dependencies.now()).toISOString(),
-      });
+      event = createEvent(
+        record.session.id,
+        record.session.round,
+        new Date(dependencies.now()).toISOString(),
+        payload,
+      );
       await dependencies.eventSink.append(event);
     } catch {
       return false;
     }
-    record.events.push(event);
+    record.events.push(copyEvent(event));
     return true;
   }
 
@@ -733,6 +787,7 @@ function readVerification(value: unknown, commandId: string): VerificationObserv
     }
     const reportedCommandId = ownValue(result, "commandId");
     const exitCode = ownValue(result, "exitCode");
+    const durationMs = ownValue(result, "durationMs");
     const status = ownValue(result, "status");
     const timedOut = ownValue(result, "timedOut");
     const summary = ownValue(result, "summary");
@@ -740,6 +795,9 @@ function readVerification(value: unknown, commandId: string): VerificationObserv
       reportedCommandId !== commandId ||
       (typeof exitCode !== "number" && exitCode !== null) ||
       (typeof exitCode === "number" && !Number.isInteger(exitCode)) ||
+      typeof durationMs !== "number" ||
+      !Number.isSafeInteger(durationMs) ||
+      durationMs < 0 ||
       !isConsistentVerificationStatus(status, timedOut) ||
       typeof summary !== "string"
     ) {
@@ -749,7 +807,9 @@ function readVerification(value: unknown, commandId: string): VerificationObserv
     return Object.freeze({
       commandId: reportedCommandId,
       exitCode,
+      durationMs,
       status,
+      timedOut: timedOut === true,
       summary: sanitized.length === 0 ? "VERIFICATION_RESULT" : sanitized,
     });
   } catch {
@@ -919,6 +979,14 @@ function isValidPendingPatchTimestamp(value: number): boolean {
   return value <= MAX_DATE_TIMESTAMP_MS - PENDING_PATCH_TTL_MS;
 }
 
+function isSafeGeneratedId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value) &&
+    !/(?:sk-|sk_|pk_|rk_|ghp_)[A-Za-z0-9_-]{12,}/iu.test(value)
+  );
+}
+
 function isResolveInput(value: unknown): value is ResolvePendingPatchInput {
   try {
     const input = asRecord(value);
@@ -984,13 +1052,177 @@ function snapshot(
 }
 
 function copyEvent(event: HarnessEvent): HarnessEvent {
+  return createEvent(
+    event.sessionId,
+    event.round,
+    event.occurredAt,
+    eventPayload(event),
+  );
+}
+
+function stateEvent(record: SessionRecord, summary: string): HarnessEventPayload {
   return Object.freeze({
-    sessionId: event.sessionId,
-    round: event.round,
-    kind: event.kind,
-    summary: event.summary,
-    occurredAt: event.occurredAt,
+    kind: "state",
+    summary,
+    details: Object.freeze({ state: record.session.state }),
   });
+}
+
+function verificationEvent(verification: VerificationObservation): HarnessEventPayload {
+  return Object.freeze({
+    kind: "verification",
+    summary: verification.summary,
+    details: Object.freeze({
+      commandId: verification.commandId,
+      exitCode: verification.exitCode,
+      durationMs: verification.durationMs,
+      status: verification.status,
+      timedOut: verification.timedOut,
+    }),
+  });
+}
+
+function approvalEvent(summary: string, approval: Approval): HarnessEventPayload {
+  return Object.freeze({
+    kind: "approval",
+    summary,
+    details: Object.freeze({
+      approvalId: approval.id,
+      actionId: approval.actionId,
+      patchHash: approval.patchHash,
+      baseHash: approval.baseHash,
+      status: approval.status,
+      createdAt: approval.createdAt,
+      expiresAt: approval.expiresAt,
+    }),
+  });
+}
+
+function createEvent(
+  sessionId: string,
+  round: number,
+  occurredAt: string,
+  payload: HarnessEventPayload,
+): HarnessEvent {
+  const base = {
+    sessionId,
+    round,
+    summary: payload.summary,
+    occurredAt,
+  };
+  switch (payload.kind) {
+    case "action":
+      return Object.freeze({
+        ...base,
+        kind: "action",
+        details: Object.freeze({
+          actionId: payload.details.actionId,
+          actionKind: payload.details.actionKind,
+        }),
+      });
+    case "policy":
+      return Object.freeze({
+        ...base,
+        kind: "policy",
+        details: Object.freeze({ decision: payload.details.decision }),
+      });
+    case "tool_result":
+      return Object.freeze({
+        ...base,
+        kind: "tool_result",
+        details: Object.freeze({ toolKind: payload.details.toolKind }),
+      });
+    case "verification":
+      return Object.freeze({
+        ...base,
+        kind: "verification",
+        details: Object.freeze({
+          commandId: payload.details.commandId,
+          exitCode: payload.details.exitCode,
+          durationMs: payload.details.durationMs,
+          status: payload.details.status,
+          timedOut: payload.details.timedOut,
+        }),
+      });
+    case "state":
+      return Object.freeze({
+        ...base,
+        kind: "state",
+        details: Object.freeze({ state: payload.details.state }),
+      });
+    case "approval":
+      return Object.freeze({
+        ...base,
+        kind: "approval",
+        details: Object.freeze({
+          approvalId: payload.details.approvalId,
+          actionId: payload.details.actionId,
+          patchHash: payload.details.patchHash,
+          baseHash: payload.details.baseHash,
+          status: payload.details.status,
+          createdAt: payload.details.createdAt,
+          expiresAt: payload.details.expiresAt,
+        }),
+      });
+  }
+}
+
+function eventPayload(event: HarnessEvent): HarnessEventPayload {
+  switch (event.kind) {
+    case "action":
+      return Object.freeze({
+        kind: "action",
+        summary: event.summary,
+        details: Object.freeze({
+          actionId: event.details.actionId,
+          actionKind: event.details.actionKind,
+        }),
+      });
+    case "policy":
+      return Object.freeze({
+        kind: "policy",
+        summary: event.summary,
+        details: Object.freeze({ decision: event.details.decision }),
+      });
+    case "tool_result":
+      return Object.freeze({
+        kind: "tool_result",
+        summary: event.summary,
+        details: Object.freeze({ toolKind: event.details.toolKind }),
+      });
+    case "verification":
+      return Object.freeze({
+        kind: "verification",
+        summary: event.summary,
+        details: Object.freeze({
+          commandId: event.details.commandId,
+          exitCode: event.details.exitCode,
+          durationMs: event.details.durationMs,
+          status: event.details.status,
+          timedOut: event.details.timedOut,
+        }),
+      });
+    case "state":
+      return Object.freeze({
+        kind: "state",
+        summary: event.summary,
+        details: Object.freeze({ state: event.details.state }),
+      });
+    case "approval":
+      return Object.freeze({
+        kind: "approval",
+        summary: event.summary,
+        details: Object.freeze({
+          approvalId: event.details.approvalId,
+          actionId: event.details.actionId,
+          patchHash: event.details.patchHash,
+          baseHash: event.details.baseHash,
+          status: event.details.status,
+          createdAt: event.details.createdAt,
+          expiresAt: event.details.expiresAt,
+        }),
+      });
+  }
 }
 
 function copyPendingPatch(view: PendingPatchView): PendingPatchView {

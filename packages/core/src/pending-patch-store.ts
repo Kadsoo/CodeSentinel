@@ -20,6 +20,11 @@ export type ClaimedPendingPatch = Readonly<{
   approval: Approval;
 }>;
 
+export type PendingPatchRegistration = Readonly<{
+  view: PendingPatchView;
+  approval: Approval;
+}>;
+
 export class PendingPatchStore {
   readonly #records = new Map<string, Map<string, PendingPatchRecord>>();
   readonly #consumed = new Map<string, Set<string>>();
@@ -31,7 +36,7 @@ export class PendingPatchStore {
     actionId: string;
     approvalId: string;
     now: number;
-  }>): PendingPatchView {
+  }>): PendingPatchRegistration {
     if (!isValidPendingPatchCreatedAt(input.now)) {
       throw new CodeSentinelCoreError("TOOL_FAILED");
     }
@@ -52,8 +57,15 @@ export class PendingPatchStore {
       sessionRecords = new Map<string, PendingPatchRecord>();
       this.#records.set(input.sessionId, sessionRecords);
     }
-    sessionRecords.set(approval.id, Object.freeze({ action, approval }));
-    return toView(action, approval.id);
+    const storedApproval = copyApproval(approval);
+    sessionRecords.set(
+      storedApproval.id,
+      Object.freeze({ action, approval: storedApproval }),
+    );
+    return Object.freeze({
+      view: toView(action, storedApproval.id),
+      approval: copyApproval(storedApproval),
+    });
   }
 
   getView(sessionId: string, approvalId: string): PendingPatchView | undefined {

@@ -21,7 +21,11 @@ import {
 function createController(
   provider: ScriptedMockProvider,
   tools: ReturnType<typeof fakeTools>["tools"],
-  options: Readonly<{ policy?: BoundPolicy; eventSink?: EventSink }> = {},
+  options: Readonly<{
+    policy?: BoundPolicy;
+    eventSink?: EventSink;
+    createId?: () => string;
+  }> = {},
 ) {
   return createAgentSessionController({
     provider,
@@ -29,7 +33,7 @@ function createController(
     tools,
     eventSink: options.eventSink ?? new InMemoryEventSink(),
     now: fixedNow,
-    createId: sequenceIds(),
+    createId: options.createId ?? sequenceIds(),
   });
 }
 
@@ -107,6 +111,13 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
         kind: "verification",
         summary: "verification passed",
         occurredAt: "2026-07-29T00:00:00.000Z",
+        details: {
+          commandId: "test",
+          exitCode: 0,
+          durationMs: 4,
+          status: "completed",
+          timedOut: false,
+        },
       },
       {
         sessionId: "repair-session-1",
@@ -114,13 +125,21 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
         kind: "state",
         summary: "NOT_REPRODUCIBLE",
         occurredAt: "2026-07-29T00:00:00.000Z",
+        details: { state: "stopped" },
       },
     ]);
   });
 
-  it("fails closed on an initial completed verification with inconsistent timedOut", async () => {
+  it.each([
+    ["negative duration", { ...passingVerification, durationMs: -1 }],
+    ["non-safe duration", { ...passingVerification, durationMs: Number.MAX_SAFE_INTEGER + 1 }],
+    ["status/timedOut mismatch", { ...passingVerification, timedOut: true }],
+  ] as const)("fails closed on an initial verification with %s without auditing it", async (
+    _name,
+    verification,
+  ) => {
     const provider = new ScriptedMockProvider([]);
-    const fake = fakeTools({ verification: { ...passingVerification, timedOut: true } });
+    const fake = fakeTools({ verification });
     const controller = createController(provider, fake.tools);
 
     const result = await controller.runAgentSession({ session: createdRepairSession() });
@@ -129,6 +148,25 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(result.finalSummary).toBe("TOOL_FAILED");
     expect(provider.requests).toEqual([]);
     expect(fake.runVerification).toHaveBeenCalledTimes(1);
+    expect(result.events.some((event) => event.kind === "verification")).toBe(false);
+  });
+
+  it("audits the real facts from the initial failed verification", async () => {
+    const provider = new ScriptedMockProvider([
+      { kind: "finish", outcome: "needs_human", summary: "inspect" },
+    ]);
+    const fake = fakeTools({ verification: failedVerification });
+    const controller = createController(provider, fake.tools);
+
+    const result = await controller.runAgentSession({ session: createdRepairSession() });
+
+    expect(result.events.find((event) => event.kind === "verification")?.details).toEqual({
+      commandId: "test",
+      exitCode: 1,
+      durationMs: 4,
+      status: "completed",
+      timedOut: false,
+    });
   });
 
   it("puts failed initial verification feedback into the first provider request", async () => {
@@ -242,6 +280,35 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(result.finalSummary).toBe("TOOL_FAILED");
     expect(provider.requests).toHaveLength(1);
     expect(fake.runVerification).toHaveBeenCalledTimes(2);
+    expect(result.events.filter((event) => event.kind === "verification")).toHaveLength(1);
+  });
+
+  it.each([
+    ["throws", (): string => { throw new Error("id-secret"); }],
+    ["returns a key-like value", (): string => "sk_live_12345678901234567890"],
+    ["returns an out-of-grammar value", (): string => "unsafe/id"],
+  ] as const)("fails closed when action ID creation %s before auditing or dispatch", async (
+    _name,
+    createId,
+  ) => {
+    const provider = new ScriptedMockProvider([
+      { kind: "read_file", path: "src/public.ts" },
+    ]);
+    const fake = fakeTools({
+      verification: failedVerification,
+      readFile: async () => "must not run",
+    });
+    const controller = createController(provider, fake.tools, { createId });
+
+    const result = await controller.runAgentSession({ session: createdRepairSession() });
+
+    expect(result.session.state).toBe("failed");
+    expect(result.finalSummary).toBe("TOOL_FAILED");
+    expect(fake.readFile).not.toHaveBeenCalled();
+    expect(result.events.some((event) => event.kind === "action")).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("sk_live_12345678901234567890");
+    expect(JSON.stringify(result)).not.toContain("unsafe/id");
+    expect(JSON.stringify(result)).not.toContain("id-secret");
   });
 
   it("feeds bounded, redacted list entries into the next provider request", async () => {
@@ -969,6 +1036,7 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(Object.isFrozen(result.session)).toBe(true);
     expect(Object.isFrozen(result.events)).toBe(true);
     expect(Object.isFrozen(result.events[0])).toBe(true);
+    expect(Object.isFrozen(result.events[0]?.details)).toBe(true);
   });
 
 });

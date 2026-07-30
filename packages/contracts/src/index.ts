@@ -15,4 +15,12 @@ export {
   VerificationCommandSchema,
 } from "./config.js";
 export type { CodeSentinelConfig, VerificationCommand } from "./config.js";
-export type { EventSink, HarnessEvent } from "./events.js";
+export type {
+  EventBase,
+  EventSink,
+  HarnessApprovalStatus,
+  HarnessEvent,
+  HarnessEventPayload,
+  HarnessToolKind,
+  HarnessVerificationStatus,
+} from "./events.js";

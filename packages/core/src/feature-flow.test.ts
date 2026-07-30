@@ -296,6 +296,33 @@ describe("AgentSessionController feature test-first flow", () => {
     expect(fake.runVerification).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ["negative duration", { ...failedVerification, durationMs: -1 }],
+    ["non-safe duration", { ...failedVerification, durationMs: Number.MAX_SAFE_INTEGER + 1 }],
+    ["status/timedOut mismatch", { ...failedVerification, status: "timed_out" as const }],
+  ] as const)(
+    "fails closed after an approved patch with %s without auditing the malformed verification",
+    async (_name, verification) => {
+      const provider = new ScriptedMockProvider([testStageProposal]);
+      const { controller, fake } = createFeatureController({
+        provider,
+        verification: [verification],
+      });
+      const pending = await controller.runAgentSession({ session: createdFeatureSession() });
+
+      const result = await controller.resolvePendingPatch({
+        sessionId: pending.session.id,
+        approvalId: pending.pendingPatch?.approvalId ?? "",
+        decision: "approve",
+      });
+
+      expect(result.session.state).toBe("failed");
+      expect(result.finalSummary).toBe("TOOL_FAILED");
+      expect(result.events.some((event) => event.kind === "verification")).toBe(false);
+      expect(fake.runVerification).toHaveBeenCalledOnce();
+    },
+  );
+
   it("preserves the three-provider-decision budget across feature approvals", async () => {
     const provider = new ScriptedMockProvider([
       testStageProposal,
