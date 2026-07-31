@@ -1,9 +1,11 @@
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import { basename, join } from "node:path";
 import { z } from "zod";
 import { HostError, hostError } from "./errors.js";
 
 const PROFILES_FILE_NAME = "profiles.json";
+const PROFILES_LOCK_FILE_NAME = "profiles.lock";
 const PROFILES_VERSION = 1;
 const MAX_PROFILES_FILE_BYTES = 65_536;
 const MAX_PROFILES = 64;
@@ -13,6 +15,8 @@ const MAX_MODEL_LENGTH = 128;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 const SAFE_TEMP_SUFFIX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const KNOWN_SECRET_FRAGMENT = /(?:sk-|sk_|pk_|rk_|ghp_)[A-Za-z0-9_-]{12,}/iu;
+const LOCK_ACQUISITION_ATTEMPTS = 20;
+const LOCK_RETRY_DELAY_MS = 5;
 
 const IdentifierSchema = z
   .string()
@@ -84,11 +88,34 @@ export interface ProfileStore {
 export type ProfileStoreOptions = Readonly<{
   stateDirectory: string;
   randomSuffix?: () => string;
+  testHooks?: ProfileStoreTestHooks;
+}>;
+
+export type ProfileStoreTestHooks = Readonly<{
+  afterProfileFilePrecheck?: () => Promise<void>;
+  beforeAtomicReplace?: () => Promise<void>;
 }>;
 
 type ProfileEnvelope = Readonly<{
   version: 1;
   profiles: readonly ProviderProfile[];
+}>;
+
+type RegularFileIdentity = Readonly<{
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}>;
+
+type ProfileFileStatus =
+  | "missing"
+  | Readonly<{ kind: "regular"; identity: RegularFileIdentity }>;
+
+type OwnedDirectoryLock = Readonly<{
+  handle: Awaited<ReturnType<typeof open>>;
+  identity: RegularFileIdentity;
 }>;
 
 function hasControlCharacter(value: string): boolean {
@@ -118,6 +145,42 @@ function isSafeHttpsEndpoint(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function regularFileIdentity(status: Stats): RegularFileIdentity {
+  return Object.freeze({
+    dev: status.dev,
+    ino: status.ino,
+    size: status.size,
+    mtimeMs: status.mtimeMs,
+    ctimeMs: status.ctimeMs,
+  });
+}
+
+function hasSameIdentity(
+  left: RegularFileIdentity,
+  right: RegularFileIdentity,
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
+}
+
+function validatedRegularProfileFile(status: Stats): RegularFileIdentity {
+  if (status.isSymbolicLink() || !status.isFile() || status.size > MAX_PROFILES_FILE_BYTES) {
+    throw hostError("STATE_CORRUPT");
+  }
+  return regularFileIdentity(status);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
 }
 
 function snapshotProfile(profile: z.infer<typeof ProviderProfileSchema>): ProviderProfile {
@@ -193,14 +256,28 @@ function defaultRandomSuffix(): string {
 class FileProfileStore implements ProfileStore {
   readonly #stateDirectory: string;
   readonly #profilePath: string;
+  readonly #lockPath: string;
   readonly #randomSuffix: () => string;
+  readonly #testHooks: ProfileStoreTestHooks;
   #pending: Promise<void> = Promise.resolve();
 
   constructor(options: ProfileStoreOptions) {
     this.#stateDirectory = validateStateDirectory(options.stateDirectory);
     this.#profilePath = join(this.#stateDirectory, PROFILES_FILE_NAME);
+    this.#lockPath = join(this.#stateDirectory, PROFILES_LOCK_FILE_NAME);
     this.#randomSuffix = options.randomSuffix ?? defaultRandomSuffix;
     if (typeof this.#randomSuffix !== "function") {
+      throw hostError("STATE_UNAVAILABLE");
+    }
+    this.#testHooks = options.testHooks ?? {};
+    if (
+      typeof this.#testHooks !== "object" ||
+      this.#testHooks === null ||
+      (this.#testHooks.afterProfileFilePrecheck !== undefined &&
+        typeof this.#testHooks.afterProfileFilePrecheck !== "function") ||
+      (this.#testHooks.beforeAtomicReplace !== undefined &&
+        typeof this.#testHooks.beforeAtomicReplace !== "function")
+    ) {
       throw hostError("STATE_UNAVAILABLE");
     }
   }
@@ -217,31 +294,35 @@ class FileProfileStore implements ProfileStore {
 
   async upsert(profile: ProviderProfile): Promise<void> {
     const validated = validateProfile(profile);
-    await this.#enqueue(async () => {
-      const current = await this.#readEnvelope();
-      const existingIndex = current.profiles.findIndex(
-        (candidate) => candidate.id === validated.id,
-      );
-      const profiles = [...current.profiles];
-      if (existingIndex === -1) {
-        profiles.push(validated);
-      } else {
-        profiles[existingIndex] = validated;
-      }
-      await this.#writeEnvelope({ version: PROFILES_VERSION, profiles });
-    });
+    await this.#enqueue(() =>
+      this.#withDirectoryLock(async () => {
+        const current = await this.#readEnvelope();
+        const existingIndex = current.profiles.findIndex(
+          (candidate) => candidate.id === validated.id,
+        );
+        const profiles = [...current.profiles];
+        if (existingIndex === -1) {
+          profiles.push(validated);
+        } else {
+          profiles[existingIndex] = validated;
+        }
+        await this.#writeEnvelope({ version: PROFILES_VERSION, profiles });
+      }),
+    );
   }
 
   async remove(id: string): Promise<void> {
     const profileId = validateIdentifier(id);
-    await this.#enqueue(async () => {
-      const current = await this.#readEnvelope();
-      const profiles = current.profiles.filter((profile) => profile.id !== profileId);
-      if (profiles.length === current.profiles.length) {
-        throw hostError("PROFILE_NOT_FOUND");
-      }
-      await this.#writeEnvelope({ version: PROFILES_VERSION, profiles });
-    });
+    await this.#enqueue(() =>
+      this.#withDirectoryLock(async () => {
+        const current = await this.#readEnvelope();
+        const profiles = current.profiles.filter((profile) => profile.id !== profileId);
+        if (profiles.length === current.profiles.length) {
+          throw hostError("PROFILE_NOT_FOUND");
+        }
+        await this.#writeEnvelope({ version: PROFILES_VERSION, profiles });
+      }),
+    );
   }
 
   async #enqueue(operation: () => Promise<void>): Promise<void> {
@@ -254,20 +335,30 @@ class FileProfileStore implements ProfileStore {
   }
 
   async #readEnvelope(): Promise<ProfileEnvelope> {
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      const status = await this.#profileFileStatus();
-      if (status === "missing") {
+      const before = await this.#profileFileStatus();
+      if (before === "missing") {
         return Object.freeze({ version: PROFILES_VERSION, profiles: Object.freeze([]) });
       }
+      await this.#runTestHook("afterProfileFilePrecheck");
 
-      const contents = await readFile(this.#profilePath, "utf8");
-      if (Buffer.byteLength(contents, "utf8") > MAX_PROFILES_FILE_BYTES) {
+      handle = await open(this.#profilePath, "r");
+      const opened = validatedRegularProfileFile(await handle.stat());
+      if (!hasSameIdentity(before.identity, opened)) {
         throw hostError("STATE_CORRUPT");
       }
+      await this.#assertProfileFileUnchanged(before);
+      const contents = await this.#readBoundedFile(handle, before.identity.size);
+      const afterRead = validatedRegularProfileFile(await handle.stat());
+      if (!hasSameIdentity(before.identity, afterRead)) {
+        throw hostError("STATE_CORRUPT");
+      }
+      await this.#assertProfileFileUnchanged(before);
 
       let parsedJson: unknown;
       try {
-        parsedJson = JSON.parse(contents) as unknown;
+        parsedJson = JSON.parse(contents.toString("utf8")) as unknown;
       } catch {
         throw hostError("STATE_CORRUPT");
       }
@@ -281,25 +372,63 @@ class FileProfileStore implements ProfileStore {
         throw error;
       }
       throw hostError("STATE_UNAVAILABLE");
+    } finally {
+      if (handle !== undefined) {
+        try {
+          await handle.close();
+        } catch {
+          // Reads already fail closed on every operational error above.
+        }
+      }
     }
   }
 
-  async #profileFileStatus(): Promise<"missing" | "regular"> {
+  async #readBoundedFile(
+    handle: Awaited<ReturnType<typeof open>>,
+    size: number,
+  ): Promise<Buffer> {
+    const contents = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < contents.length) {
+      const result = await handle.read(contents, offset, contents.length - offset, offset);
+      if (result.bytesRead === 0) {
+        throw hostError("STATE_CORRUPT");
+      }
+      offset += result.bytesRead;
+    }
+    return contents;
+  }
+
+  async #profileFileStatus(): Promise<ProfileFileStatus> {
     try {
       const status = await lstat(this.#profilePath);
-      if (status.isSymbolicLink() || !status.isFile()) {
-        throw hostError("STATE_CORRUPT");
-      }
-      if (status.size > MAX_PROFILES_FILE_BYTES) {
-        throw hostError("STATE_CORRUPT");
-      }
-      return "regular";
+      return Object.freeze({
+        kind: "regular",
+        identity: validatedRegularProfileFile(status),
+      });
     } catch (error) {
       if (isHostError(error)) {
         throw error;
       }
       if (nodeErrorCode(error) === "ENOENT") {
         return "missing";
+      }
+      throw hostError("STATE_UNAVAILABLE");
+    }
+  }
+
+  async #assertProfileFileUnchanged(expected: ProfileFileStatus): Promise<void> {
+    const actual = await this.#profileFileStatus();
+    if (expected === "missing" && actual === "missing") {
+      return;
+    }
+    if (
+      expected === "missing" ||
+      actual === "missing" ||
+      !hasSameIdentity(expected.identity, actual.identity)
+    ) {
+      if (actual !== "missing") {
+        await this.#readEnvelope();
       }
       throw hostError("STATE_UNAVAILABLE");
     }
@@ -320,6 +449,97 @@ class FileProfileStore implements ProfileStore {
     }
   }
 
+  async #runTestHook(
+    name: keyof ProfileStoreTestHooks,
+  ): Promise<void> {
+    const hook = this.#testHooks[name];
+    if (hook === undefined) {
+      return;
+    }
+    try {
+      await hook();
+    } catch (error) {
+      if (isHostError(error)) {
+        throw error;
+      }
+      throw hostError("STATE_UNAVAILABLE");
+    }
+  }
+
+  async #withDirectoryLock<T>(operation: () => Promise<T>): Promise<T> {
+    const lock = await this.#acquireDirectoryLock();
+    try {
+      return await operation();
+    } finally {
+      await this.#releaseDirectoryLock(lock);
+    }
+  }
+
+  async #acquireDirectoryLock(): Promise<OwnedDirectoryLock> {
+    await this.#ensureStateDirectory();
+
+    for (let attempt = 0; attempt < LOCK_ACQUISITION_ATTEMPTS; attempt += 1) {
+      let handle: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        handle = await open(this.#lockPath, "wx", 0o600);
+        await handle.sync();
+        const identity = validatedRegularProfileFile(await handle.stat());
+        return Object.freeze({ handle, identity });
+      } catch (error) {
+        if (handle !== undefined) {
+          try {
+            await handle.close();
+          } catch {
+            // Never expose native filesystem errors through HostError.
+          }
+        }
+        if (nodeErrorCode(error) !== "EEXIST") {
+          throw hostError("STATE_UNAVAILABLE");
+        }
+        await this.#assertExistingLockIsSafe();
+        await delay(LOCK_RETRY_DELAY_MS);
+      }
+    }
+
+    throw hostError("STATE_UNAVAILABLE");
+  }
+
+  async #assertExistingLockIsSafe(): Promise<void> {
+    try {
+      const status = await lstat(this.#lockPath);
+      if (status.isSymbolicLink() || !status.isFile() || status.size !== 0) {
+        throw hostError("STATE_UNAVAILABLE");
+      }
+    } catch (error) {
+      if (isHostError(error)) {
+        throw error;
+      }
+      if (nodeErrorCode(error) !== "ENOENT") {
+        throw hostError("STATE_UNAVAILABLE");
+      }
+    }
+  }
+
+  async #releaseDirectoryLock(lock: OwnedDirectoryLock): Promise<void> {
+    try {
+      await lock.handle.close();
+      const status = await lstat(this.#lockPath);
+      if (
+        status.isSymbolicLink() ||
+        !status.isFile() ||
+        !hasSameIdentity(lock.identity, regularFileIdentity(status))
+      ) {
+        return;
+      }
+      await rm(this.#lockPath);
+    } catch (error) {
+      if (nodeErrorCode(error) === "ENOENT") {
+        return;
+      }
+      throw hostError("STATE_UNAVAILABLE");
+    }
+  }
+
   async #writeEnvelope(envelope: ProfileEnvelope): Promise<void> {
     const parsedEnvelope = ProfileEnvelopeSchema.safeParse(envelope);
     if (!parsedEnvelope.success) {
@@ -331,8 +551,8 @@ class FileProfileStore implements ProfileStore {
     }
 
     await this.#ensureStateDirectory();
-    const status = await this.#profileFileStatus();
-    if (status === "regular") {
+    const expectedStatus = await this.#profileFileStatus();
+    if (expectedStatus !== "missing") {
       await this.#readEnvelope();
     }
 
@@ -351,14 +571,18 @@ class FileProfileStore implements ProfileStore {
       `${PROFILES_FILE_NAME}.${suffix}.tmp`,
     );
     let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let ownsTemporaryPath = false;
     try {
       handle = await open(temporaryPath, "wx", 0o600);
+      ownsTemporaryPath = true;
       await handle.writeFile(serialized, "utf8");
       await handle.sync();
       await handle.close();
       handle = undefined;
+      await this.#runTestHook("beforeAtomicReplace");
+      await this.#assertProfileFileUnchanged(expectedStatus);
       await rename(temporaryPath, this.#profilePath);
-    } catch {
+    } catch (error) {
       if (handle !== undefined) {
         try {
           await handle.close();
@@ -366,10 +590,15 @@ class FileProfileStore implements ProfileStore {
           // The outer operation intentionally exposes only a stable host error.
         }
       }
-      try {
-        await rm(temporaryPath, { force: true });
-      } catch {
-        // The outer operation intentionally exposes only a stable host error.
+      if (ownsTemporaryPath) {
+        try {
+          await rm(temporaryPath, { force: true });
+        } catch {
+          // The outer operation intentionally exposes only a stable host error.
+        }
+      }
+      if (isHostError(error)) {
+        throw error;
       }
       throw hostError("STATE_UNAVAILABLE");
     }

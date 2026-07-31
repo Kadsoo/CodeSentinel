@@ -38,9 +38,10 @@ async function withStateDirectory(
 
 async function expectHostError(
   operation: () => Promise<unknown>,
-  code: HostErrorCode,
+  code: HostErrorCode | readonly HostErrorCode[],
 ): Promise<void> {
   const { HostError } = await host();
+  const expectedCodes = Array.isArray(code) ? code : [code];
   let captured: unknown;
   try {
     await operation();
@@ -49,7 +50,9 @@ async function expectHostError(
   }
 
   expect(captured).toBeInstanceOf(HostError);
-  expect(captured).toMatchObject({ code, message: code });
+  const actualCode = (captured as { code: HostErrorCode }).code;
+  expect(expectedCodes).toContain(actualCode);
+  expect(captured).toMatchObject({ code: actualCode, message: actualCode });
   expect(captured).not.toHaveProperty("cause");
   expect(captured).not.toHaveProperty("input");
   expect(String(captured)).not.toContain(SECRET_SENTINEL);
@@ -109,6 +112,116 @@ describe("profile store", () => {
       });
       expect(existsSync(join(stateDirectory, "profiles.json.replace-1.tmp"))).toBe(false);
       expect(existsSync(join(stateDirectory, "profiles.json.replace-2.tmp"))).toBe(false);
+    });
+  });
+
+  it("serializes concurrent upserts from separate stores sharing one state directory", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const first = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "concurrent-first",
+      });
+      const second = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "concurrent-second",
+      });
+      const njuProfile = {
+        id: "nju-default",
+        kind: "nju_se_hub" as const,
+        endpoint: "https://hub.example.edu/v1/chat/completions",
+        model: "course-model",
+        credentialRef: "nju-default",
+      };
+
+      await Promise.all([first.upsert(validProfile), second.upsert(njuProfile)]);
+
+      const ids = (await first.list()).map((profile) => profile.id);
+      expect(ids).toHaveLength(2);
+      expect(ids).toEqual(
+        expect.arrayContaining([validProfile.id, njuProfile.id]),
+      );
+      expect(existsSync(join(stateDirectory, "profiles.lock"))).toBe(false);
+    });
+  });
+
+  it("fails closed when a checked profile file is replaced with a symlink before reading", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const profilePath = join(stateDirectory, profilesFileName);
+      const outsidePath = join(stateDirectory, "outside-profile.json");
+      const initialStore = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "safe-read-initial",
+      });
+      await initialStore.upsert(validProfile);
+      await writeFile(outsidePath, "x".repeat(65_537), "utf8");
+      let hookRan = false;
+      const racingStore = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "safe-read-race",
+        testHooks: {
+          afterProfileFilePrecheck: async () => {
+            hookRan = true;
+            await rm(profilePath);
+            await symlink(outsidePath, profilePath, "file");
+          },
+        },
+      });
+
+      await expectHostError(() => racingStore.list(), [
+        "STATE_CORRUPT",
+        "STATE_UNAVAILABLE",
+      ]);
+      expect(hookRan).toBe(true);
+      expect(await readFile(outsidePath, "utf8")).toHaveLength(65_537);
+    });
+  });
+
+  it("does not overwrite a profile file corrupted after mutation validation", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const profilePath = join(stateDirectory, profilesFileName);
+      const initialStore = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "replace-race-initial",
+      });
+      await initialStore.upsert(validProfile);
+      let hookRan = false;
+      const racingStore = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "replace-race",
+        testHooks: {
+          beforeAtomicReplace: async () => {
+            hookRan = true;
+            await writeFile(profilePath, "{corrupted-after-validation", "utf8");
+          },
+        },
+      });
+
+      await expectHostError(
+        () => racingStore.upsert({ ...validProfile, model: "replacement-model" }),
+        "STATE_CORRUPT",
+      );
+      expect(hookRan).toBe(true);
+      expect(await readFile(profilePath, "utf8")).toBe("{corrupted-after-validation");
+      expect(existsSync(join(stateDirectory, "profiles.json.replace-race.tmp"))).toBe(false);
+    });
+  });
+
+  it("does not delete a pre-existing temporary-path collision it did not create", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const collisionPath = join(stateDirectory, "profiles.json.collision.tmp");
+      await writeFile(collisionPath, "not-owned-by-store", "utf8");
+      const store = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "collision",
+      });
+
+      await expectHostError(() => store.upsert(validProfile), "STATE_UNAVAILABLE");
+      expect(await readFile(collisionPath, "utf8")).toBe("not-owned-by-store");
+      expect(existsSync(join(stateDirectory, profilesFileName))).toBe(false);
     });
   });
 

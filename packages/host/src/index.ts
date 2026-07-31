@@ -4,5 +4,6 @@ export { createProfileStore } from "./profile-store.js";
 export type {
   ProfileStore,
   ProfileStoreOptions,
+  ProfileStoreTestHooks,
   ProviderProfile,
 } from "./profile-store.js";
