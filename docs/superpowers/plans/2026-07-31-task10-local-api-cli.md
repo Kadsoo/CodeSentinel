@@ -450,7 +450,7 @@ git commit -m "feat: coordinate local agent sessions"
 - Create: apps/api/src/routes.test.ts
 - Create: apps/api/src/server.test.ts
 
-- [ ] **Step 1: Write failing Fastify inject tests**
+- [x] **Step 1: Write failing Fastify inject tests**
 
 Cover strict body parsing, 202 creation, 409 active session, 400 unknown command, bounded list/timeline
 query values, approval, stop idempotence, credential status and no secret echo.
@@ -482,13 +482,13 @@ expect(created.json()).toEqual({ sessionId: "session-1", state: "created" });
 Test a fake listener receives exactly host 127.0.0.1 and port 48761 and maps EADDRINUSE to
 SERVER_ALREADY_RUNNING without process probing or termination.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: npm test -- --run apps/api/src/routes.test.ts apps/api/src/server.test.ts
 
 Expected: FAIL because the API package is absent.
 
-- [ ] **Step 3: Implement Fastify as a thin Host adapter**
+- [x] **Step 3: Implement Fastify as a thin Host adapter**
 
 Build Fastify with logger false and bodyLimit 16 * 1024. Strict Zod schemas allow session list limits
 1 through 100 and timeline limits 1 through 500. Map known Host errors to 400, 404, 409 or 503 and
@@ -499,13 +499,13 @@ credential status/set/clear routes. PUT credential accepts only an existing prof
 it returns 204 and never logs/echoes it. Do not add CORS, remote hosts, static public assets or a
 credential read route. Export buildServer for inject tests and startServer for the fixed port.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: npm test -- --run apps/api/src/routes.test.ts apps/api/src/server.test.ts && npm run typecheck
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add apps/api package-lock.json
