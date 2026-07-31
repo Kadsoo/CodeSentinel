@@ -385,7 +385,7 @@ git commit -m "feat: compose canonical workspace agent runtimes"
 - Modify: packages/host/src/errors.ts
 - Modify: packages/host/src/index.ts
 
-- [ ] **Step 1: Write failing service tests**
+- [x] **Step 1: Write failing service tests**
 
 Inject a controlled runtime/controller and repository. Verify persistence happens before background
 execution, second nonterminal creation receives SESSION_ACTIVE, approvals reach only the matching
@@ -403,13 +403,13 @@ await service.stop({ sessionId: accepted.sessionId });
 expect(stopProbe(accepted.sessionId)).toBe(true);
 ~~~
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: npm test -- --run packages/host/src/session-service.test.ts
 
 Expected: FAIL because no Host session service exists.
 
-- [ ] **Step 3: Implement asynchronous single-session coordination**
+- [x] **Step 3: Implement asynchronous single-session coordination**
 
 ~~~ts
 export interface SessionService {
@@ -428,13 +428,13 @@ runtime through awaiting_approval; clear it only after terminal Core result. For
 append one valid state/stopped event and remove the runtime immediately. For running, set only the
 StopProbe flag; Core stops at its next safe boundary. Repeated stops must not create duplicate events.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: npm test -- --run packages/host/src/session-service.test.ts packages/core/src/agent-loop.test.ts packages/persistence/src/session-lifecycle.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add packages/host/src/session-service.ts packages/host/src/session-service.test.ts packages/host/src/errors.ts packages/host/src/index.ts
