@@ -97,6 +97,10 @@ export function createAgentSessionController(
     if (!(await appendEvent(record, stateEvent(record, "RUNNING")))) {
       return eventSinkFailure(record);
     }
+    const stoppedAfterRunningAudit = await stopIfRequested(record);
+    if (stoppedAfterRunningAudit !== undefined) {
+      return stoppedAfterRunningAudit;
+    }
     return runProviderFeedbackCycles(record);
   }
 
@@ -202,6 +206,10 @@ export function createAgentSessionController(
     ) {
       return eventSinkFailure(record);
     }
+    const stoppedAfterPatchAudit = await stopIfRequested(record);
+    if (stoppedAfterPatchAudit !== undefined) {
+      return stoppedAfterPatchAudit;
+    }
 
     return verifyApprovedPatch(record);
   }
@@ -213,6 +221,10 @@ export function createAgentSessionController(
   ): Promise<AgentSessionResult> {
     if (!(await appendEvent(record, approvalEvent(summary, approval)))) {
       return eventSinkFailure(record);
+    }
+    const stoppedAfterApprovalAudit = await stopIfRequested(record);
+    if (stoppedAfterApprovalAudit !== undefined) {
+      return stoppedAfterApprovalAudit;
     }
     return terminal(record, "stopped", summary);
   }
@@ -242,6 +254,10 @@ export function createAgentSessionController(
     }
     if (!(await appendEvent(record, verificationEvent(verification)))) {
       return eventSinkFailure(record);
+    }
+    const stoppedAfterVerificationAudit = await stopIfRequested(record);
+    if (stoppedAfterVerificationAudit !== undefined) {
+      return stoppedAfterVerificationAudit;
     }
     if (verification.status !== "completed" || verification.exitCode === null) {
       return terminal(record, "failed", "TOOL_FAILED");
@@ -292,6 +308,10 @@ export function createAgentSessionController(
     if (!(await appendEvent(record, stateEvent(record, "RUNNING")))) {
       return eventSinkFailure(record);
     }
+    const stoppedAfterRunningAudit = await stopIfRequested(record);
+    if (stoppedAfterRunningAudit !== undefined) {
+      return stoppedAfterRunningAudit;
+    }
     return runProviderFeedbackCycles(record);
   }
 
@@ -321,6 +341,10 @@ export function createAgentSessionController(
     if (!(await appendEvent(record, verificationEvent(verification)))) {
       return eventSinkFailure(record);
     }
+    const stoppedAfterVerificationAudit = await stopIfRequested(record);
+    if (stoppedAfterVerificationAudit !== undefined) {
+      return stoppedAfterVerificationAudit;
+    }
     if (verification.status !== "completed") {
       return terminal(record, "failed", "TOOL_FAILED");
     }
@@ -335,6 +359,10 @@ export function createAgentSessionController(
     setState(record, "running");
     if (!(await appendEvent(record, stateEvent(record, "RUNNING")))) {
       return eventSinkFailure(record);
+    }
+    const stoppedAfterRunningAudit = await stopIfRequested(record);
+    if (stoppedAfterRunningAudit !== undefined) {
+      return stoppedAfterRunningAudit;
     }
     return runProviderFeedbackCycles(record);
   }
@@ -398,6 +426,10 @@ export function createAgentSessionController(
       ) {
         return eventSinkFailure(record);
       }
+      const stoppedAfterActionAudit = await stopIfRequested(record);
+      if (stoppedAfterActionAudit !== undefined) {
+        return stoppedAfterActionAudit;
+      }
       if (action.kind === "propose_patch" && action.stage !== expectedStage) {
         return terminal(record, "blocked", "FEATURE_STAGE_INVALID");
       }
@@ -411,6 +443,10 @@ export function createAgentSessionController(
         }))
       ) {
         return eventSinkFailure(record);
+      }
+      const stoppedAfterPolicyAudit = await stopIfRequested(record);
+      if (stoppedAfterPolicyAudit !== undefined) {
+        return stoppedAfterPolicyAudit;
       }
       if (policy.decision === "deny") {
         return terminal(record, "blocked", "POLICY_DENIED");
@@ -488,11 +524,25 @@ export function createAgentSessionController(
       return terminal(record, "failed", "TOOL_FAILED");
     }
 
+    const stoppedBeforeAwaitingApproval = await stopIfRequested(record);
+    if (stoppedBeforeAwaitingApproval !== undefined) {
+      pendingPatches.discard(record.session.id, registration.view.approvalId);
+      record.pendingApprovalId = undefined;
+      releaseTerminalRecord(record);
+      return stoppedBeforeAwaitingApproval;
+    }
     setState(record, "awaiting_approval");
     if (!(await appendEvent(record, stateEvent(record, "AWAITING_APPROVAL")))) {
       pendingPatches.discard(record.session.id, registration.view.approvalId);
       record.pendingApprovalId = undefined;
       return eventSinkFailure(record);
+    }
+    const stoppedAfterAwaitingApprovalAudit = await stopIfRequested(record);
+    if (stoppedAfterAwaitingApprovalAudit !== undefined) {
+      pendingPatches.discard(record.session.id, registration.view.approvalId);
+      record.pendingApprovalId = undefined;
+      releaseTerminalRecord(record);
+      return stoppedAfterAwaitingApprovalAudit;
     }
     if (
       !(await appendEvent(
@@ -503,6 +553,13 @@ export function createAgentSessionController(
       pendingPatches.discard(record.session.id, registration.view.approvalId);
       record.pendingApprovalId = undefined;
       return eventSinkFailure(record);
+    }
+    const stoppedAfterApprovalPendingAudit = await stopIfRequested(record);
+    if (stoppedAfterApprovalPendingAudit !== undefined) {
+      pendingPatches.discard(record.session.id, registration.view.approvalId);
+      record.pendingApprovalId = undefined;
+      releaseTerminalRecord(record);
+      return stoppedAfterApprovalPendingAudit;
     }
 
     return snapshot(record, "APPROVAL_PENDING", registration.view);
@@ -538,6 +595,10 @@ export function createAgentSessionController(
       }
       if (!(await appendEvent(record, verificationEvent(verification)))) {
         return eventSinkFailure(record);
+      }
+      const stoppedAfterVerificationAudit = await stopIfRequested(record);
+      if (stoppedAfterVerificationAudit !== undefined) {
+        return stoppedAfterVerificationAudit;
       }
       if (verification.status !== "completed") {
         return terminal(record, "failed", "TOOL_FAILED");
@@ -588,6 +649,10 @@ export function createAgentSessionController(
         }))
       ) {
         return eventSinkFailure(record);
+      }
+      const stoppedAfterToolAudit = await stopIfRequested(record);
+      if (stoppedAfterToolAudit !== undefined) {
+        return stoppedAfterToolAudit;
       }
       record.feedback.push(Object.freeze({ kind: "tool_result", summary: feedbackSummary }));
     }

@@ -901,6 +901,44 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(JSON.stringify(result)).not.toContain(timestampSecret);
   });
 
+  it("stops after an action audit is persisted instead of continuing to its terminal outcome", async () => {
+    const actionAuditStarted = deferred<void>();
+    const releaseActionAudit = deferred<void>();
+    let stopped = false;
+    const append = vi.fn<EventSink["append"]>(async (event) => {
+      if (event.kind === "action") {
+        actionAuditStarted.resolve();
+        await releaseActionAudit.promise;
+      }
+    });
+    const provider = new ScriptedMockProvider([
+      { kind: "finish", outcome: "needs_human", summary: "inspect" },
+    ]);
+    const fake = fakeTools({ verification: failedVerification });
+    const controller = createController(provider, fake.tools, {
+      eventSink: { append },
+      shouldStop: () => stopped,
+    });
+
+    const running = controller.runAgentSession({ session: createdRepairSession() });
+    await actionAuditStarted.promise;
+    stopped = true;
+    releaseActionAudit.resolve();
+
+    const result = await running;
+
+    expect(result.session.state).toBe("stopped");
+    expect(result.finalSummary).toBe("STOP_REQUESTED");
+    expect(provider.requests).toHaveLength(1);
+    expect(result.events.map((event) => event.kind)).toEqual([
+      "verification",
+      "state",
+      "action",
+      "state",
+    ]);
+    expect(result.events.at(-1)?.summary).toBe("STOP_REQUESTED");
+  });
+
   it("blocks a denied action before it reaches a tool", async () => {
     const provider = new ScriptedMockProvider([{ kind: "run_verification", commandId: "test" }]);
     const fake = fakeTools({ verification: failedVerification });
