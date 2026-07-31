@@ -49,6 +49,8 @@ export type AgentSessionResult = Readonly<{
   pendingPatch?: PendingPatchView;
 }>;
 
+export type StopProbe = (sessionId: string) => boolean;
+
 export type AgentLoopDependencies = Readonly<{
   provider: Provider;
   policy: BoundPolicy;
@@ -56,6 +58,7 @@ export type AgentLoopDependencies = Readonly<{
   eventSink: EventSink;
   now: () => number;
   createId: () => string;
+  shouldStop?: StopProbe;
 }>;
 
 export interface AgentSessionController {

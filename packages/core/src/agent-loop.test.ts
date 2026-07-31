@@ -19,22 +19,36 @@ import {
 } from "./test-support.js";
 
 function createController(
-  provider: ScriptedMockProvider,
+  provider: Provider,
   tools: ReturnType<typeof fakeTools>["tools"],
   options: Readonly<{
     policy?: BoundPolicy;
     eventSink?: EventSink;
     createId?: () => string;
+    shouldStop?: (sessionId: string) => boolean;
   }> = {},
 ) {
-  return createAgentSessionController({
+  const dependencies = {
     provider,
     policy: options.policy ?? allowPolicy,
     tools,
     eventSink: options.eventSink ?? new InMemoryEventSink(),
     now: fixedNow,
     createId: options.createId ?? sequenceIds(),
+    ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
+  };
+  return createAgentSessionController(dependencies);
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
   });
+  return { promise, resolve };
 }
 
 function createThrowingProvider(message: string): {
@@ -723,6 +737,114 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(thrown.complete).toHaveBeenCalledTimes(1);
     expect(fake.runVerification).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(result)).not.toContain("provider-secret-value");
+  });
+
+  it("stops after a provider response without dispatching another action", async () => {
+    const providerResponse = deferred<unknown>();
+    const providerStarted = deferred<void>();
+    const complete = vi.fn<Provider["complete"]>(() => {
+      providerStarted.resolve();
+      return providerResponse.promise;
+    });
+    const fake = fakeTools({ verification: failedVerification });
+    let stopped = false;
+    const controller = createController(
+      { complete },
+      fake.tools,
+      { shouldStop: () => stopped },
+    );
+
+    const running = controller.runAgentSession({ session: createdRepairSession() });
+    await providerStarted.promise;
+    stopped = true;
+    providerResponse.resolve({ kind: "run_verification", commandId: "test" });
+
+    const result = await running;
+
+    expect(result.session.state).toBe("stopped");
+    expect(result.finalSummary).toBe("STOP_REQUESTED");
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(fake.runVerification).toHaveBeenCalledTimes(1);
+    expect(result.events.map((event) => event.kind)).toEqual([
+      "verification",
+      "state",
+      "state",
+    ]);
+    expect(result.events.at(-1)?.summary).toBe("STOP_REQUESTED");
+  });
+
+  it("stops during approval resolution before writing an approved patch", async () => {
+    const baseHash = deferred<string>();
+    const baseHashStarted = deferred<void>();
+    const fake = fakeTools({ verification: failedVerification });
+    fake.getCurrentBaseHash.mockImplementation(() => {
+      baseHashStarted.resolve();
+      return baseHash.promise;
+    });
+    let stopped = false;
+    const controller = createController(
+      new ScriptedMockProvider([repairPatch()]),
+      fake.tools,
+      { policy: askForPatchPolicy, shouldStop: () => stopped },
+    );
+    const pending = await controller.runAgentSession({ session: createdRepairSession() });
+
+    const resolving = controller.resolvePendingPatch({
+      sessionId: "repair-session-1",
+      approvalId: pending.pendingPatch?.approvalId ?? "missing",
+      decision: "approve",
+    });
+    await baseHashStarted.promise;
+    stopped = true;
+    baseHash.resolve("a".repeat(64));
+
+    const result = await resolving;
+
+    expect(result.session.state).toBe("stopped");
+    expect(result.finalSummary).toBe("STOP_REQUESTED");
+    expect(fake.getCurrentBaseHash).toHaveBeenCalledOnce();
+    expect(fake.applyApprovedPatch).not.toHaveBeenCalled();
+    expect(result.events.at(-1)?.summary).toBe("STOP_REQUESTED");
+  });
+
+  it("keeps the existing behavior when no stop probe is configured", async () => {
+    const provider = new ScriptedMockProvider([
+      { kind: "finish", outcome: "needs_human", summary: "inspect" },
+    ]);
+    const fake = fakeTools({ verification: failedVerification });
+    const controller = createController(provider, fake.tools);
+
+    const result = await controller.runAgentSession({ session: createdRepairSession() });
+
+    expect(result.session.state).toBe("blocked");
+    expect(result.finalSummary).toBe("NEEDS_HUMAN");
+    expect(provider.requests).toHaveLength(1);
+    expect(fake.runVerification).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops generically when the stop probe throws after a tool operation", async () => {
+    let probeCalls = 0;
+    const fake = fakeTools({ verification: failedVerification });
+    const controller = createController(
+      new ScriptedMockProvider([]),
+      fake.tools,
+      {
+        shouldStop: () => {
+          probeCalls += 1;
+          if (probeCalls === 2) {
+            throw new Error("stop-probe-secret");
+          }
+          return false;
+        },
+      },
+    );
+
+    const result = await controller.runAgentSession({ session: createdRepairSession() });
+
+    expect(result.session.state).toBe("stopped");
+    expect(result.finalSummary).toBe("STOP_REQUESTED");
+    expect(fake.runVerification).toHaveBeenCalledOnce();
+    expect(JSON.stringify(result)).not.toContain("stop-probe-secret");
   });
 
   it("blocks a denied action before it reaches a tool", async () => {

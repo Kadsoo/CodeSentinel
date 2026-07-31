@@ -118,11 +118,19 @@ export function createAgentSessionController(
     }
     record.pendingApprovalId = undefined;
 
+    const stoppedBeforeBaseHash = await stopIfRequested(record);
+    if (stoppedBeforeBaseHash !== undefined) {
+      return stoppedBeforeBaseHash;
+    }
     let currentBaseHash: string;
     try {
       currentBaseHash = await dependencies.tools.getCurrentBaseHash(claimed.action.path);
     } catch {
       return terminal(record, "failed", "TOOL_FAILED");
+    }
+    const stoppedAfterBaseHash = await stopIfRequested(record);
+    if (stoppedAfterBaseHash !== undefined) {
+      return stoppedAfterBaseHash;
     }
     if (!isSha256Hash(currentBaseHash)) {
       return terminal(record, "failed", "TOOL_FAILED");
@@ -138,10 +146,18 @@ export function createAgentSessionController(
       return terminalWithoutEvent(record, "failed", "TOOL_FAILED");
     }
 
+    const stoppedBeforeApproval = await stopIfRequested(record);
+    if (stoppedBeforeApproval !== undefined) {
+      return stoppedBeforeApproval;
+    }
     const approval =
       input.decision === "approve"
         ? approvePatch(claimed.approval, currentBaseHash, now)
         : rejectPatch(claimed.approval, currentBaseHash, now);
+    const stoppedAfterApproval = await stopIfRequested(record);
+    if (stoppedAfterApproval !== undefined) {
+      return stoppedAfterApproval;
+    }
     if (approval.status === "expired") {
       const summary =
         currentBaseHash === claimed.approval.baseHash
@@ -160,6 +176,10 @@ export function createAgentSessionController(
       return eventSinkFailure(record);
     }
 
+    const stoppedBeforePatch = await stopIfRequested(record);
+    if (stoppedBeforePatch !== undefined) {
+      return stoppedBeforePatch;
+    }
     try {
       await dependencies.tools.applyApprovedPatch({
         path: claimed.action.path,
@@ -168,6 +188,10 @@ export function createAgentSessionController(
       });
     } catch {
       return terminal(record, "failed", "TOOL_FAILED");
+    }
+    const stoppedAfterPatch = await stopIfRequested(record);
+    if (stoppedAfterPatch !== undefined) {
+      return stoppedAfterPatch;
     }
     if (
       !(await appendEvent(record, {
@@ -194,6 +218,10 @@ export function createAgentSessionController(
   }
 
   async function verifyApprovedPatch(record: SessionRecord): Promise<AgentSessionResult> {
+    const stoppedBeforeVerification = await stopIfRequested(record);
+    if (stoppedBeforeVerification !== undefined) {
+      return stoppedBeforeVerification;
+    }
     let value: unknown;
     try {
       value = await dependencies.tools.runVerification({
@@ -202,6 +230,10 @@ export function createAgentSessionController(
       });
     } catch {
       return terminal(record, "failed", "TOOL_FAILED");
+    }
+    const stoppedAfterVerification = await stopIfRequested(record);
+    if (stoppedAfterVerification !== undefined) {
+      return stoppedAfterVerification;
     }
 
     const verification = readVerification(value, record.session.verificationCommandId);
@@ -264,6 +296,10 @@ export function createAgentSessionController(
   }
 
   async function runInitialRepairVerification(record: SessionRecord): Promise<AgentSessionResult> {
+    const stoppedBeforeVerification = await stopIfRequested(record);
+    if (stoppedBeforeVerification !== undefined) {
+      return stoppedBeforeVerification;
+    }
     let value: unknown;
     try {
       value = await dependencies.tools.runVerification({
@@ -272,6 +308,10 @@ export function createAgentSessionController(
       });
     } catch {
       return terminal(record, "failed", "TOOL_FAILED");
+    }
+    const stoppedAfterVerification = await stopIfRequested(record);
+    if (stoppedAfterVerification !== undefined) {
+      return stoppedAfterVerification;
     }
 
     const verification = readVerification(value, record.session.verificationCommandId);
@@ -305,6 +345,10 @@ export function createAgentSessionController(
       if (expectedStage === undefined) {
         return terminal(record, "failed", "TOOL_FAILED");
       }
+      const stoppedBeforeProvider = await stopIfRequested(record);
+      if (stoppedBeforeProvider !== undefined) {
+        return stoppedBeforeProvider;
+      }
       let response: unknown;
       try {
         response = await dependencies.provider.complete(
@@ -318,6 +362,10 @@ export function createAgentSessionController(
         );
       } catch {
         return terminal(record, "failed", "PROVIDER_FAILED");
+      }
+      const stoppedAfterProvider = await stopIfRequested(record);
+      if (stoppedAfterProvider !== undefined) {
+        return stoppedAfterProvider;
       }
 
       let parsed: ReturnType<typeof ActionSchema.safeParse>;
@@ -470,11 +518,19 @@ export function createAgentSessionController(
       if (record.session.taskKind === "feature_implementation") {
         return terminal(record, "blocked", "FEATURE_STAGE_INVALID");
       }
+      const stoppedBeforeVerification = await stopIfRequested(record);
+      if (stoppedBeforeVerification !== undefined) {
+        return stoppedBeforeVerification;
+      }
       let value: unknown;
       try {
         value = await dependencies.tools.runVerification(action);
       } catch {
         return terminal(record, "failed", "TOOL_FAILED");
+      }
+      const stoppedAfterVerification = await stopIfRequested(record);
+      if (stoppedAfterVerification !== undefined) {
+        return stoppedAfterVerification;
       }
       const verification = readVerification(value, action.commandId);
       if (verification === undefined) {
@@ -494,6 +550,10 @@ export function createAgentSessionController(
       }
       record.feedback.push(Object.freeze({ kind: "verification", summary: verification.summary }));
     } else {
+      const stoppedBeforeTool = await stopIfRequested(record);
+      if (stoppedBeforeTool !== undefined) {
+        return stoppedBeforeTool;
+      }
       let feedbackSummary: string | undefined;
       try {
         switch (action.kind) {
@@ -512,6 +572,10 @@ export function createAgentSessionController(
         }
       } catch {
         return terminal(record, "failed", "TOOL_FAILED");
+      }
+      const stoppedAfterTool = await stopIfRequested(record);
+      if (stoppedAfterTool !== undefined) {
+        return stoppedAfterTool;
       }
       if (feedbackSummary === undefined) {
         return terminal(record, "failed", "TOOL_FAILED");
@@ -563,6 +627,17 @@ export function createAgentSessionController(
     const result = snapshot(record, summary);
     releaseTerminalRecord(record);
     return result;
+  }
+
+  async function stopIfRequested(record: SessionRecord): Promise<AgentSessionResult | undefined> {
+    try {
+      if (dependencies.shouldStop?.(record.session.id) !== true) {
+        return undefined;
+      }
+    } catch {
+      // Stop probes are deliberately fail-closed and never disclose thrown details.
+    }
+    return terminal(record, "stopped", "STOP_REQUESTED");
   }
 
   function terminalWithoutEvent(

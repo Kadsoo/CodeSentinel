@@ -17,4 +17,5 @@ export type {
   ResolvePendingPatchInput,
   SessionPhase,
   StartSessionInput,
+  StopProbe,
 } from "./types.js";
