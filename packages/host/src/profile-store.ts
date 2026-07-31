@@ -638,22 +638,18 @@ class FileProfileStore implements ProfileStore {
       }
 
       if (contents.length === 0) {
-        return Object.freeze({
-          identity: before.identity,
-          acquiredAt: validatedNow(Math.floor(before.identity.mtimeMs)),
-          processId: undefined,
-        });
+        return this.#legacyDirectoryLock(before.identity);
       }
 
       let parsedJson: unknown;
       try {
         parsedJson = JSON.parse(contents.toString("utf8")) as unknown;
       } catch {
-        return "changed";
+        return this.#legacyDirectoryLock(before.identity);
       }
       const parsedLock = LockEnvelopeSchema.safeParse(parsedJson);
       if (!parsedLock.success) {
-        return "changed";
+        return this.#legacyDirectoryLock(before.identity);
       }
       return Object.freeze({
         identity: before.identity,
@@ -663,6 +659,9 @@ class FileProfileStore implements ProfileStore {
     } catch (error) {
       if (isHostError(error)) {
         throw error;
+      }
+      if (nodeErrorCode(error) === "ENOENT") {
+        return "changed";
       }
       throw hostError("STATE_UNAVAILABLE");
     } finally {
@@ -674,6 +673,14 @@ class FileProfileStore implements ProfileStore {
         }
       }
     }
+  }
+
+  #legacyDirectoryLock(identity: RegularFileIdentity): ExistingDirectoryLock {
+    return Object.freeze({
+      identity,
+      acquiredAt: validatedNow(Math.floor(identity.mtimeMs)),
+      processId: undefined,
+    });
   }
 
   async #lockFileStatus(): Promise<ProfileFileStatus> {

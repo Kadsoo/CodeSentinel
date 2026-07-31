@@ -197,6 +197,25 @@ describe("profile store", () => {
     });
   });
 
+  it("recovers an expired stable partial lock left during payload publication", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const lockPath = join(stateDirectory, "profiles.lock");
+      await writeFile(lockPath, '{"version":1,"owner":"partial', "utf8");
+      await utimes(lockPath, 0, 0);
+      const store = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "recovered-partial-lock",
+        now: () => 60_001,
+      });
+
+      await store.upsert(validProfile);
+
+      expect(await store.get(validProfile.id)).toEqual(validProfile);
+      expect(existsSync(lockPath)).toBe(false);
+    });
+  });
+
   it("cleans up its own new lock when lock synchronization fails", async () => {
     await withStateDirectory(async (stateDirectory) => {
       const { createProfileStore } = await host();
