@@ -1,5 +1,14 @@
 # AGENT_LOG
 
+## 2026-08-01 — TASK-010: Local API, CLI and integration delivery evidence
+
+- Branch: `feat/task10-api-cli`; all changes remain local. No push, PR, merge, real Provider, network, or credential service was used.
+- TDD RED/GREEN: Task 10 sections 1–8 are checked off in the plan; representative RED counts included config 2 failures, persistence 4 failures, Core stop 3 failures, Host profile 16 failures, runtime 13 failures, session service 7 failures, API missing-package failure, and CLI missing-package failure. Corrective RED tests covered compatibility, audit races, stale locks, approval consistency, and package boundaries.
+- Integration RED/GREEN: initial fixture ordering failed with `PERSISTENCE_FAILED`; an invalid feature-phase fixture produced `FEATURE_STAGE_INVALID`; the corrected controlled `test_repair` fixture passed. Final integration verifies API/Host/CLI/fake Provider composition, concurrent-create 409, stop idempotence, bounded timeline, `[REDACTED]` persistence, and sentinel absence from profiles, SQLite sidecar files, HTTP and CLI output.
+- Final verification: focused integration 16 files / 663 passed; full `npm test` 36 files / 1003 passed / 6 skipped; `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` exited 0. Child verification processes and Fastify/repository resources were closed in `finally`; no long-lived process remains.
+- Task 10 implementation commits include `75c8bf8`, `a736767`, `bff16dd`, `7e8b929`, `6c6b5cf`, `09a3af1`, `99eaf5d`, `e210185`, `8d97258`, `d4ad558`, `bb9ca7f`, `289a4d2`, `63b3eb4`, `6f38452`, `ac4e4e3`, `2265912`, `0795cd8`, and `583258d`.
+- Independent reviews: Task 1–8 specifications and quality reviews were compliant/Ready; the Task 9 final audit found no code C/I/M blockers after evidence was recorded.
+
 ## 2026-07-28T23:15:27+08:00 — SPEC-001：设计规约阶段
 
 - 触发技能：using-superpowers、brainstorming、writing-plans（计划尚未开始）。
