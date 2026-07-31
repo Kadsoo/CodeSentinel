@@ -25,6 +25,7 @@ function createController(
     policy?: BoundPolicy;
     eventSink?: EventSink;
     createId?: () => string;
+    now?: () => number;
     shouldStop?: (sessionId: string) => boolean;
   }> = {},
 ) {
@@ -33,7 +34,7 @@ function createController(
     policy: options.policy ?? allowPolicy,
     tools,
     eventSink: options.eventSink ?? new InMemoryEventSink(),
-    now: fixedNow,
+    now: options.now ?? fixedNow,
     createId: options.createId ?? sequenceIds(),
     ...(options.shouldStop === undefined ? {} : { shouldStop: options.shouldStop }),
   };
@@ -845,6 +846,59 @@ describe("AgentSessionController initial reproduction and bounded feedback", () 
     expect(result.finalSummary).toBe("STOP_REQUESTED");
     expect(fake.runVerification).toHaveBeenCalledOnce();
     expect(JSON.stringify(result)).not.toContain("stop-probe-secret");
+  });
+
+  it.each([
+    ["returns true", (): boolean => true],
+    ["throws", (): boolean => {
+      throw new Error("stop-probe-secret");
+    }],
+  ] as const)(
+    "keeps the stop result when the probe %s and its terminal event cannot be appended",
+    async (_description, shouldStop) => {
+      const append = vi.fn<EventSink["append"]>(async (event) => {
+        if (event.kind === "state" && event.summary === "STOP_REQUESTED") {
+          throw new Error("event-sink-secret");
+        }
+      });
+      const provider = new ScriptedMockProvider([]);
+      const fake = fakeTools({ verification: failedVerification });
+      const controller = createController(provider, fake.tools, {
+        eventSink: { append },
+        shouldStop,
+      });
+
+      const result = await controller.runAgentSession({ session: createdRepairSession() });
+
+      expect(result.session.state).toBe("stopped");
+      expect(result.finalSummary).toBe("STOP_REQUESTED");
+      expect(result.events).toEqual([]);
+      expect(provider.requests).toEqual([]);
+      expect(fake.runVerification).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toContain("event-sink-secret");
+      expect(JSON.stringify(result)).not.toContain("stop-probe-secret");
+    },
+  );
+
+  it("keeps the stop result when its terminal event timestamp cannot be created", async () => {
+    const timestampSecret = "stop-terminal-time-secret";
+    const provider = new ScriptedMockProvider([]);
+    const fake = fakeTools({ verification: failedVerification });
+    const controller = createController(provider, fake.tools, {
+      now: () => {
+        throw new Error(timestampSecret);
+      },
+      shouldStop: () => true,
+    });
+
+    const result = await controller.runAgentSession({ session: createdRepairSession() });
+
+    expect(result.session.state).toBe("stopped");
+    expect(result.finalSummary).toBe("STOP_REQUESTED");
+    expect(result.events).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(fake.runVerification).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain(timestampSecret);
   });
 
   it("blocks a denied action before it reaches a tool", async () => {

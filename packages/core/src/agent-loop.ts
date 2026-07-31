@@ -637,7 +637,12 @@ export function createAgentSessionController(
     } catch {
       // Stop probes are deliberately fail-closed and never disclose thrown details.
     }
-    return terminal(record, "stopped", "STOP_REQUESTED");
+    setState(record, "stopped");
+    // STOP_REQUESTED is authoritative; terminal auditing is best-effort only.
+    await appendEvent(record, stateEvent(record, "STOP_REQUESTED"));
+    const result = snapshot(record, "STOP_REQUESTED");
+    releaseTerminalRecord(record);
+    return result;
   }
 
   function terminalWithoutEvent(
