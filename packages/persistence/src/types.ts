@@ -65,15 +65,23 @@ export type PersistedSessionMemory = Readonly<{
   updatedAt: string;
 }>;
 
+export type SessionReadLimit = Readonly<{
+  limit: number;
+}>;
+
 export interface SessionRepository extends EventSink {
   createSession(input: CreatePersistedSessionInput): Promise<void>;
   loadSession(sessionId: string): Promise<PersistedSession | undefined>;
+  listSessions(input: SessionReadLimit): Promise<readonly PersistedSession[]>;
   appendAction(input: AppendActionInput): Promise<void>;
   saveApproval(input: SaveApprovalInput): Promise<void>;
   appendVerification(input: AppendVerificationInput): Promise<void>;
   saveSessionMemory(input: SaveSessionMemoryInput): Promise<void>;
   loadSessionMemory(sessionId: string): Promise<PersistedSessionMemory | undefined>;
-  loadTimeline(sessionId: string): Promise<readonly HarnessEvent[]>;
+  loadTimeline(
+    sessionId: string,
+    input?: SessionReadLimit,
+  ): Promise<readonly HarnessEvent[]>;
   recoverInterruptedSessions(now: number): Promise<number>;
   clearSession(sessionId: string): Promise<void>;
   close(): void;

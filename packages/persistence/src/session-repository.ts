@@ -23,6 +23,7 @@ import type {
   PersistedSessionMemory,
   SaveApprovalInput,
   SaveSessionMemoryInput,
+  SessionReadLimit,
   SessionRepository,
 } from "./types.js";
 
@@ -33,6 +34,8 @@ const SHA_256 = /^[0-9a-f]{64}$/u;
 const MAX_DATE_TIMESTAMP = 8_640_000_000_000_000;
 const APPROVAL_EXPIRED_ON_RESTART = "APPROVAL_EXPIRED_ON_RESTART";
 const SESSION_INTERRUPTED = "SESSION_INTERRUPTED";
+const MAX_SESSION_READ_LIMIT = 500;
+const DEFAULT_SESSION_READ_LIMIT = MAX_SESSION_READ_LIMIT;
 
 const EVENT_KEYS = Object.freeze([
   "sessionId",
@@ -67,6 +70,8 @@ const SAVE_SESSION_MEMORY_INPUT_KEYS = Object.freeze([
   "summary",
   "updatedAt",
 ] as const);
+
+const SESSION_READ_LIMIT_KEYS = Object.freeze(["limit"] as const);
 
 const TERMINAL_STATES = new Set<SessionState>([
   "completed",
@@ -725,6 +730,23 @@ function validatedSessionMemoryInput(
   }
 }
 
+function validatedSessionReadLimit(input: unknown): number {
+  try {
+    const limit = readOwnDataObject(input, SESSION_READ_LIMIT_KEYS).limit;
+    if (
+      typeof limit !== "number" ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > MAX_SESSION_READ_LIMIT
+    ) {
+      throw persistenceError("INVALID_PERSISTENCE_INPUT");
+    }
+    return limit;
+  } catch {
+    throw persistenceError("INVALID_PERSISTENCE_INPUT");
+  }
+}
+
 function mapSessionRow(value: unknown, expectedId: string): PersistedSession {
   if (typeof value !== "object" || value === null) {
     throw persistenceError("PERSISTENCE_FAILED");
@@ -778,6 +800,19 @@ function mapSessionRow(value: unknown, expectedId: string): PersistedSession {
     createdAt,
     updatedAt,
   });
+}
+
+function mapListedSessionRow(value: unknown): PersistedSession {
+  try {
+    if (typeof value !== "object" || value === null) {
+      throw persistenceError("PERSISTENCE_FAILED");
+    }
+    const id = (value as Readonly<Record<string, unknown>>).id;
+    assertIdentifier(id);
+    return mapSessionRow(value, id);
+  } catch {
+    throw persistenceError("PERSISTENCE_FAILED");
+  }
 }
 
 function mapSessionMemoryRow(
@@ -1589,6 +1624,21 @@ export function createSessionRepository(databasePath: string): SessionRepository
       FROM sessions
       WHERE id = ?
     `);
+    const selectSessions = database.prepare(`
+      SELECT
+        id,
+        task_kind,
+        state,
+        round,
+        workspace_id,
+        provider_id,
+        verification_command_id,
+        created_at,
+        updated_at
+      FROM sessions
+      ORDER BY updated_at DESC, id DESC
+      LIMIT ?
+    `);
     const selectInterruptedSessions = database.prepare(`
       SELECT
         id,
@@ -1957,6 +2007,63 @@ export function createSessionRepository(databasePath: string): SessionRepository
         approval_expires_at
       FROM timeline_events
       WHERE session_id = ?
+      ORDER BY event_id ASC
+    `);
+    const selectLimitedTimeline = database.prepare(`
+      SELECT
+        event_id,
+        session_id,
+        round,
+        kind,
+        summary,
+        occurred_at,
+        action_id,
+        action_kind,
+        policy_decision,
+        tool_kind,
+        command_id,
+        exit_code,
+        duration_ms,
+        verification_status,
+        timed_out,
+        session_state,
+        approval_id,
+        approval_action_id,
+        patch_hash,
+        base_hash,
+        approval_status,
+        approval_created_at,
+        approval_expires_at
+      FROM (
+        SELECT
+          event_id,
+          session_id,
+          round,
+          kind,
+          summary,
+          occurred_at,
+          action_id,
+          action_kind,
+          policy_decision,
+          tool_kind,
+          command_id,
+          exit_code,
+          duration_ms,
+          verification_status,
+          timed_out,
+          session_state,
+          approval_id,
+          approval_action_id,
+          patch_hash,
+          base_hash,
+          approval_status,
+          approval_created_at,
+          approval_expires_at
+        FROM timeline_events
+        WHERE session_id = ?
+        ORDER BY event_id DESC
+        LIMIT ?
+      )
       ORDER BY event_id ASC
     `);
     const selectTimelineByEventId = database.prepare(`
@@ -3100,6 +3207,20 @@ export function createSessionRepository(databasePath: string): SessionRepository
       }
     }
 
+    async function listSessions(
+      input: SessionReadLimit,
+    ): Promise<readonly PersistedSession[]> {
+      assertOpen();
+      const limit = validatedSessionReadLimit(input);
+      try {
+        return Object.freeze(
+          selectSessions.all(limit).map(mapListedSessionRow),
+        );
+      } catch {
+        throw persistenceError("PERSISTENCE_FAILED");
+      }
+    }
+
     async function append(event: HarnessEvent): Promise<void> {
       assertOpen();
       beginMutation();
@@ -3182,11 +3303,16 @@ export function createSessionRepository(databasePath: string): SessionRepository
 
     async function loadTimeline(
       sessionId: string,
+      input?: SessionReadLimit,
     ): Promise<readonly HarnessEvent[]> {
       assertOpen();
       assertIdentifier(sessionId);
+      const limit =
+        input === undefined
+          ? DEFAULT_SESSION_READ_LIMIT
+          : validatedSessionReadLimit(input);
       try {
-        const rows = selectTimeline.all(sessionId);
+        const rows = selectLimitedTimeline.all(sessionId, limit);
         return Object.freeze(
           rows.map((row) => mapTimelineRow(row, sessionId)),
         );
@@ -3249,6 +3375,7 @@ export function createSessionRepository(databasePath: string): SessionRepository
     return Object.freeze({
       createSession,
       loadSession,
+      listSessions,
       append,
       appendAction,
       saveApproval,

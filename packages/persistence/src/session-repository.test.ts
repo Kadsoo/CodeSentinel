@@ -477,6 +477,96 @@ describe("session event persistence", () => {
     });
   });
 
+  it("lists sessions newest first with a deterministic id tie breaker and bounded limits", async () => {
+    await withRepository(async (repository) => {
+      await repository.createSession(
+        validSession({ id: "session-old", createdAt: at(0) }),
+      );
+      await repository.append(
+        stateEvent(0, at(1), "running", "running", "session-old"),
+      );
+      await repository.createSession(
+        validSession({ id: "session-beta", createdAt: at(0) }),
+      );
+      await repository.append(
+        stateEvent(0, at(3), "running", "running", "session-beta"),
+      );
+      await repository.createSession(
+        validSession({ id: "session-gamma", createdAt: at(0) }),
+      );
+      await repository.append(
+        stateEvent(0, at(3), "running", "running", "session-gamma"),
+      );
+
+      await expect(repository.listSessions({ limit: 1 })).resolves.toMatchObject([
+        { id: "session-gamma", updatedAt: at(3) },
+      ]);
+      await expect(repository.listSessions({ limit: 500 })).resolves.toMatchObject([
+        { id: "session-gamma", updatedAt: at(3) },
+        { id: "session-beta", updatedAt: at(3) },
+        { id: "session-old", updatedAt: at(1) },
+      ]);
+    });
+  });
+
+  it("returns a chronological suffix for bounded timelines while retaining safe defaults", async () => {
+    await withRepository(async (repository) => {
+      await createRunningSession(repository);
+      await repository.append(
+        actionEvent(1, at(1), "read_file", "bounded-action", "read input"),
+      );
+      await repository.append(policyEvent(1, at(2), "allow", "allowed"));
+      await repository.append(
+        toolEvent(1, at(3), "read_file", "read result"),
+      );
+      await repository.append(stateEvent(1, at(4), "running", "continue"));
+
+      const all = await repository.loadTimeline(SESSION_ID);
+      await expect(
+        repository.loadTimeline(SESSION_ID, { limit: 500 }),
+      ).resolves.toEqual(all);
+      await expect(
+        repository.loadTimeline(SESSION_ID, { limit: 3 }),
+      ).resolves.toEqual([
+        policyEvent(1, at(2), "allow", "allowed"),
+        toolEvent(1, at(3), "read_file", "read result"),
+        stateEvent(1, at(4), "running", "continue"),
+      ]);
+      await expect(
+        repository.loadTimeline(SESSION_ID, { limit: 1 }),
+      ).resolves.toEqual([stateEvent(1, at(4), "running", "continue")]);
+    });
+  });
+
+  it("rejects every invalid bounded-read limit with the stable input error", async () => {
+    const invalidInputs: readonly [string, unknown][] = [
+      ["zero", { limit: 0 }],
+      ["negative", { limit: -1 }],
+      ["fractional", { limit: 1.5 }],
+      ["NaN", { limit: Number.NaN }],
+      ["infinity", { limit: Number.POSITIVE_INFINITY }],
+      ["too large", { limit: 501 }],
+      ["string limit", { limit: "1" }],
+      ["object limit", { limit: {} }],
+      ["string input", "1"],
+      ["object without limit", {}],
+    ];
+
+    await withRepository(async (repository) => {
+      await repository.createSession(validSession());
+      for (const [, input] of invalidInputs) {
+        await expectRejected(
+          repository.listSessions(input as never),
+          "INVALID_PERSISTENCE_INPUT",
+        );
+        await expectRejected(
+          repository.loadTimeline(SESSION_ID, input as never),
+          "INVALID_PERSISTENCE_INPUT",
+        );
+      }
+    });
+  });
+
   it("allows deterministic events with the same canonical timestamp", async () => {
     await withRepository(async (repository) => {
       await createRunningSession(repository);
@@ -1361,7 +1451,7 @@ describe("session event persistence", () => {
     },
   );
 
-  it("returns SESSION_NOT_FOUND for append and an empty timeline for unknown load", async () => {
+  it("returns SESSION_NOT_FOUND for append and empty bounded reads for unknown data", async () => {
     await withRepository(async (repository) => {
       await expectRejected(
         repository.append(
@@ -1369,9 +1459,10 @@ describe("session event persistence", () => {
         ),
         "SESSION_NOT_FOUND",
       );
-      await expect(repository.loadTimeline("missing-session")).resolves.toEqual(
-        [],
-      );
+      await expect(repository.listSessions({ limit: 1 })).resolves.toEqual([]);
+      await expect(
+        repository.loadTimeline("missing-session", { limit: 1 }),
+      ).resolves.toEqual([]);
     });
   });
 

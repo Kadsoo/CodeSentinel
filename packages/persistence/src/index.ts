@@ -18,5 +18,6 @@ export type {
   PersistedSessionMemory,
   SaveApprovalInput,
   SaveSessionMemoryInput,
+  SessionReadLimit,
   SessionRepository,
 } from "./types.js";
