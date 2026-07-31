@@ -177,7 +177,7 @@ git commit -m "feat: bound persisted session and timeline reads"
 - Modify: packages/core/src/agent-loop.ts
 - Modify: packages/core/src/agent-loop.test.ts
 
-- [ ] **Step 1: Write failing stop tests**
+- [x] **Step 1: Write failing stop tests**
 
 Use a deferred Provider or verification fake. Set a stop flag after the external operation begins and
 verify that no next Provider action or patch write occurs.
@@ -203,13 +203,13 @@ expect(tools.applyApprovedPatch).not.toHaveBeenCalled();
 Also prove that no probe preserves all existing behavior and a throwing probe stops without exposing
 the thrown value.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: npm test -- --run packages/core/src/agent-loop.test.ts
 
 Expected: FAIL because AgentLoopDependencies has no shouldStop member.
 
-- [ ] **Step 3: Add the optional immutable StopProbe**
+- [x] **Step 3: Add the optional immutable StopProbe**
 
 ~~~ts
 export type StopProbe = (sessionId: string) => boolean;
@@ -230,13 +230,13 @@ approval operation, but never recursively while appending its terminal state eve
 "STOP_REQUESTED"). Once terminal, no later action is appended. Do not modify round limits, event
 shape, policy decisions or approval hashes.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: npm test -- --run packages/core/src/agent-loop.test.ts packages/core/src/approval-resume.test.ts packages/persistence/src/core-integration.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add packages/core/src/types.ts packages/core/src/agent-loop.ts packages/core/src/agent-loop.test.ts
