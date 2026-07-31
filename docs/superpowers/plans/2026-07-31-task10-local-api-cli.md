@@ -521,7 +521,7 @@ git commit -m "feat: expose loopback session API"
 - Create: apps/cli/src/main.ts
 - Create: apps/cli/src/main.test.ts
 
-- [ ] **Step 1: Write failing CLI tests**
+- [x] **Step 1: Write failing CLI tests**
 
 Inject terminal streams, a hidden prompt port and Host services. Assert set requires TTY, prompts
 once without printing the secret sentinel, status prints only configured/missing, clear calls
@@ -545,13 +545,13 @@ expect(await profileStore.get("deepseek-default")).toMatchObject({
 });
 ~~~
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: npm test -- --run apps/cli/src/credentials.test.ts apps/cli/src/main.test.ts
 
 Expected: FAIL because the CLI package is absent.
 
-- [ ] **Step 3: Implement testable Commander commands**
+- [x] **Step 3: Implement testable Commander commands**
 
 Export runCli(argv, dependencies): Promise<number>; main calls it with production streams. Set accepts a
 safe ID, provider enum, model maximum 128 and optional endpoint. Use the official DeepSeek endpoint
@@ -564,13 +564,13 @@ remains with missing status so the user can retry. Clear calls Credential Store 
 the profile. Probe is explicit and calls the injected probe once. Load keytar only inside
 an explicit credential/session production operation, never at module import, startup, CI or test time.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: npm test -- --run apps/cli/src/credentials.test.ts apps/cli/src/main.test.ts packages/providers/src/credential-store.test.ts packages/providers/src/openai-compatible.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add apps/cli package-lock.json
