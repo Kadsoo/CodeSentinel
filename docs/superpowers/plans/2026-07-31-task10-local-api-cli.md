@@ -252,7 +252,7 @@ git commit -m "feat: stop agent sessions at safe boundaries"
 - Create: packages/host/src/profile-store.test.ts
 - Create: packages/host/src/index.ts
 
-- [ ] **Step 1: Write failing profile tests**
+- [x] **Step 1: Write failing profile tests**
 
 Use a temporary injected state directory. Cover profile round trip, a malformed/oversize/unknown-key
 file, duplicate IDs, endpoint query/fragment, non-safe refs and a secret-sentinel scan.
@@ -274,13 +274,13 @@ await expect(
 ).rejects.toMatchObject({ code: "PROFILE_INVALID" });
 ~~~
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: npm test -- --run packages/host/src/profile-store.test.ts
 
 Expected: FAIL because the Host package and profile store are absent.
 
-- [ ] **Step 3: Implement strict profile envelopes and atomic replacement**
+- [x] **Step 3: Implement strict profile envelopes and atomic replacement**
 
 ~~~ts
 export type ProviderProfile = Readonly<{
@@ -304,13 +304,13 @@ flag wx, close it, then rename it over profiles.json. Reject a symlink/non-regul
 never overwrite a corrupted existing profile. Export HostError codes PROFILE_INVALID,
 PROFILE_NOT_FOUND, STATE_UNAVAILABLE and STATE_CORRUPT. The error has no cause or input field.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: npm test -- --run packages/host/src/profile-store.test.ts && npm run typecheck && npm run lint
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add packages/host package-lock.json
