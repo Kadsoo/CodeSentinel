@@ -103,6 +103,9 @@ export function createSessionService(
       if (hasActiveSession(state.active)) {
         throw hostError("SESSION_ACTIVE");
       }
+      if (await hasPersistedActiveSession(repository)) {
+        throw hostError("SESSION_ACTIVE");
+      }
 
       const workspace = await loadWorkspace(workspaceLoader, request.workspacePath);
       const id = readIdentifier(createId());
@@ -474,6 +477,15 @@ async function persistCreated(
 async function loadSession(repository: SessionRepository, id: string): Promise<PersistedSession | undefined> {
   try {
     return await repository.loadSession(id);
+  } catch {
+    throw hostError("STATE_UNAVAILABLE");
+  }
+}
+
+async function hasPersistedActiveSession(repository: SessionRepository): Promise<boolean> {
+  try {
+    const sessions = await repository.listSessions({ limit: MAX_LIST_LIMIT });
+    return sessions.some((session) => !isTerminal(session.state));
   } catch {
     throw hostError("STATE_UNAVAILABLE");
   }
