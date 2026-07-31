@@ -224,6 +224,34 @@ describe("local session service", () => {
     expect(resolvePendingPatch).toHaveBeenCalledTimes(2);
   });
 
+  it("persists a failed terminal state before dropping a runtime on non-Core approval failure", async () => {
+    const resolvePendingPatch = vi.fn().mockRejectedValueOnce(new Error("controller failed"));
+    const setup = await serviceWith({
+      runtimeFactory: vi.fn(async () => ({
+        workspaceId: WORKSPACE.workspaceId,
+        profile: { id: "profile-1", kind: "deepseek" as const, endpoint: "https://example.test", model: "fake", credentialRef: "ref" },
+        controller: {
+          runAgentSession: vi.fn(async (input: { session: AgentSession }) => ({
+            session: { ...input.session, state: "awaiting_approval" },
+            events: [],
+          }) as unknown as AgentSessionResult),
+          resolvePendingPatch,
+        },
+      })),
+    });
+    await setup.service.create(validRequest);
+    await expect(
+      setup.service.resolveApproval({ sessionId: "service-session-1", approvalId: "approval-1", decision: "approve" }),
+    ).rejects.toMatchObject({ code: "STATE_UNAVAILABLE" });
+    expect(setup.append).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "state",
+      summary: "APPROVAL_FAILED",
+      details: { state: "failed" },
+    }));
+    await expect(setup.service.get("service-session-1")).resolves.toMatchObject({ state: "failed" });
+    await expect(setup.service.stop({ sessionId: "service-session-1" })).resolves.toBe("already_stopped");
+  });
+
   it("passes bounded read limits through to persistence", async () => {
     const setup = await serviceWith();
     await setup.service.list(7);
@@ -289,5 +317,59 @@ describe("local session service", () => {
     }));
     expect(await setup.service.stop({ sessionId: "service-session-1" })).toBe("already_stopped");
     expect(setup.append).toHaveBeenCalledTimes(1);
+  });
+
+  it("rolls back an awaiting stop flag when persistence fails so a retry can stop once", async () => {
+    const setup = await serviceWith();
+    await setup.service.create(validRequest);
+    setup.append.mockRejectedValueOnce(new Error("persistence unavailable"));
+    await expect(setup.service.stop({ sessionId: "service-session-1" })).rejects.toMatchObject({
+      code: "STATE_UNAVAILABLE",
+    });
+    expect(await setup.service.stop({ sessionId: "service-session-1" })).toBe("accepted");
+    expect(setup.append).toHaveBeenCalledTimes(2);
+    expect(await setup.service.stop({ sessionId: "service-session-1" })).toBe("already_stopped");
+  });
+
+  it("lets a concurrent stop request set the probe while approval is in flight", async () => {
+    let releaseApproval!: (result: AgentSessionResult) => void;
+    let stopProbe: StopProbe | undefined;
+    const resolvePendingPatch = vi.fn(() => new Promise<AgentSessionResult>((resolve) => {
+      releaseApproval = resolve;
+    }));
+    const setup = await serviceWith({
+      runtimeFactory: vi.fn(async (_input: unknown, dependencies: { shouldStop: StopProbe }) => {
+        void _input;
+        stopProbe = dependencies.shouldStop;
+        return {
+          workspaceId: WORKSPACE.workspaceId,
+          profile: { id: "profile-1", kind: "deepseek" as const, endpoint: "https://example.test", model: "fake", credentialRef: "ref" },
+          controller: {
+            runAgentSession: vi.fn(async (input: { session: AgentSession }) => ({
+              session: { ...input.session, state: "awaiting_approval" },
+              events: [],
+            }) as unknown as AgentSessionResult),
+            resolvePendingPatch,
+          },
+        };
+      }),
+    });
+    await setup.service.create(validRequest);
+    const approvalPromise = setup.service.resolveApproval({
+      sessionId: "service-session-1",
+      approvalId: "approval-1",
+      decision: "approve",
+    });
+    await vi.waitFor(() => expect(resolvePendingPatch).toHaveBeenCalledTimes(1));
+    await expect(setup.service.stop({ sessionId: "service-session-1" })).resolves.toBe("accepted");
+    expect(stopProbe?.("service-session-1")).toBe(true);
+    releaseApproval({
+      session: { ...session("service-session-1"), state: "stopped" },
+      events: [],
+    } as unknown as AgentSessionResult);
+    await approvalPromise;
+    await expect(setup.service.stop({ sessionId: "service-session-1" })).rejects.toMatchObject({
+      code: "SESSION_NOT_ACTIVE",
+    });
   });
 });

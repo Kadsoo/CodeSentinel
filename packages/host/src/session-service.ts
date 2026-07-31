@@ -207,7 +207,7 @@ export function createSessionService(
         await clearOperation(record!);
         throw hostError("APPROVAL_NOT_FOUND");
       }
-      await finishOperation(record!, undefined);
+      await failApprovalOperation(record!);
       throw hostError("STATE_UNAVAILABLE");
     }
     await finishOperation(record!, result);
@@ -223,11 +223,17 @@ export function createSessionService(
         if (active.stopRequested) {
           return "already_stopped";
         }
-        active.stopRequested = true;
         if (active.state === "awaiting_approval" && active.operation === undefined) {
-          await appendStoppedEvent(repository, active.id, active.round, now);
+          try {
+            await appendStoppedEvent(repository, active.id, active.round, now);
+          } catch {
+            throw hostError("STATE_UNAVAILABLE");
+          }
+          active.stopRequested = true;
           active.state = "stopped";
           state.active = undefined;
+        } else {
+          active.stopRequested = true;
         }
         return "accepted";
       }
@@ -314,6 +320,24 @@ export function createSessionService(
       if (state.active === record) {
         record.operation = undefined;
       }
+    });
+  }
+
+  async function failApprovalOperation(record: RuntimeRecord): Promise<void> {
+    await runExclusive(async () => {
+      if (state.active !== record) {
+        return;
+      }
+      try {
+        await appendFailedEvent(repository, record.id, record.round, now);
+      } catch {
+        // Keep the awaiting runtime available when terminal persistence fails.
+        record.operation = undefined;
+        return;
+      }
+      record.operation = undefined;
+      record.state = "failed";
+      state.active = undefined;
     });
   }
 
@@ -514,6 +538,23 @@ async function appendStoppedEvent(
     summary: "STOP_REQUESTED",
     occurredAt: new Date(timestamp).toISOString(),
     details: Object.freeze({ state: "stopped" }),
+  }));
+}
+
+async function appendFailedEvent(
+  repository: EventSink,
+  sessionId: string,
+  round: number,
+  now: () => number,
+): Promise<void> {
+  const timestamp = readTimestamp(now());
+  await repository.append(Object.freeze({
+    sessionId,
+    round,
+    kind: "state",
+    summary: "APPROVAL_FAILED",
+    occurredAt: new Date(timestamp).toISOString(),
+    details: Object.freeze({ state: "failed" }),
   }));
 }
 
