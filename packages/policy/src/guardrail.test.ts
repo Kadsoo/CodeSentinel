@@ -15,6 +15,7 @@ const trustedCommand: VerificationCommand = {
 const context = {
   workspaceRoot: "C:/repo",
   config: {
+    providerProfileId: "deepseek-default",
     allowedPaths: ["src/**"],
     verificationCommands: [],
   },

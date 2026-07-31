@@ -1,4 +1,4 @@
-import { CodeSentinelConfigSchema, IdentifierSchema } from "../../contracts/src/index.js";
+import { IdentifierSchema, VerificationCommandSchema } from "../../contracts/src/index.js";
 
 export function isConfiguredVerificationCommand(
   commandId: unknown,
@@ -9,10 +9,11 @@ export function isConfiguredVerificationCommand(
     return false;
   }
 
-  const parsedConfig = CodeSentinelConfigSchema.safeParse({ verificationCommands });
+  const parsedCommands = VerificationCommandSchema.array().safeParse(verificationCommands);
   return (
-    parsedConfig.success &&
-    parsedConfig.data.verificationCommands.some((command) => command.id === normalizedCommandId)
+    parsedCommands.success &&
+    new Set(parsedCommands.data.map((command) => command.id)).size === parsedCommands.data.length &&
+    parsedCommands.data.some((command) => command.id === normalizedCommandId)
   );
 }
 
