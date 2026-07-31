@@ -20,3 +20,11 @@ export type {
   ProviderFactory,
   WorkspaceRuntime,
 } from "./runtime.js";
+export { createSessionService } from "./session-service.js";
+export type {
+  CreateLocalSessionInput,
+  CreatedLocalSession,
+  SessionRuntimeFactory,
+  SessionService,
+  SessionServiceDependencies,
+} from "./session-service.js";
