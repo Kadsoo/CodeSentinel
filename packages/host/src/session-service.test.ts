@@ -372,4 +372,36 @@ describe("local session service", () => {
       code: "SESSION_NOT_ACTIVE",
     });
   });
+
+  it("allows retrying stop when concurrent approval failure cannot persist its terminal state", async () => {
+    let rejectApproval!: (error: Error) => void;
+    const resolvePendingPatch = vi.fn(() => new Promise<AgentSessionResult>((_resolve, reject) => {
+      rejectApproval = reject;
+    }));
+    const setup = await serviceWith({
+      runtimeFactory: vi.fn(async () => ({
+        workspaceId: WORKSPACE.workspaceId,
+        profile: { id: "profile-1", kind: "deepseek" as const, endpoint: "https://example.test", model: "fake", credentialRef: "ref" },
+        controller: {
+          runAgentSession: vi.fn(async (input: { session: AgentSession }) => ({
+            session: { ...input.session, state: "awaiting_approval" },
+            events: [],
+          }) as unknown as AgentSessionResult),
+          resolvePendingPatch,
+        },
+      })),
+    });
+    await setup.service.create(validRequest);
+    const approvalPromise = setup.service.resolveApproval({
+      sessionId: "service-session-1",
+      approvalId: "approval-1",
+      decision: "approve",
+    });
+    await vi.waitFor(() => expect(resolvePendingPatch).toHaveBeenCalledTimes(1));
+    await expect(setup.service.stop({ sessionId: "service-session-1" })).resolves.toBe("accepted");
+    setup.append.mockRejectedValueOnce(new Error("persistence unavailable"));
+    rejectApproval(new Error("controller failed"));
+    await expect(approvalPromise).rejects.toMatchObject({ code: "STATE_UNAVAILABLE" });
+    expect(await setup.service.stop({ sessionId: "service-session-1" })).toBe("accepted");
+  });
 });

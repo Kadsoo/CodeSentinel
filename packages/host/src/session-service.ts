@@ -333,6 +333,7 @@ export function createSessionService(
       } catch {
         // Keep the awaiting runtime available when terminal persistence fails.
         record.operation = undefined;
+        record.stopRequested = false;
         return;
       }
       record.operation = undefined;
