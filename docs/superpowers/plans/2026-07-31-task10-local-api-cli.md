@@ -113,7 +113,7 @@ git commit -m "feat: bind workspace config to profile and path policy"
 - Modify: packages/persistence/src/session-repository.ts
 - Modify: packages/persistence/src/session-repository.test.ts
 
-- [ ] **Step 1: Write failing repository boundary tests**
+- [x] **Step 1: Write failing repository boundary tests**
 
 Create sessions with different update timestamps and more events than a requested limit. Verify
 newest-first session order, chronological selected timeline suffix, and invalid limits.
@@ -130,13 +130,13 @@ await expect(repository.listSessions({ limit: 0 })).rejects.toMatchObject({
 });
 ~~~
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: npm test -- --run packages/persistence/src/session-repository.test.ts
 
 Expected: FAIL because listSessions and a bounded timeline signature do not exist.
 
-- [ ] **Step 3: Implement typed bounded reads**
+- [x] **Step 3: Implement typed bounded reads**
 
 ~~~ts
 export type SessionReadLimit = Readonly<{ limit: number }>;
@@ -157,13 +157,13 @@ Validate a 1 through 500 integer before preparing SQL. Use:
 
 Preserve existing schema fingerprint validation, strict row decoding and redaction.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: npm test -- --run packages/persistence/src/session-repository.test.ts packages/persistence/src/core-integration.test.ts
 
 Expected: PASS including DB, journal, WAL and SHM leak regressions.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add packages/persistence/src/types.ts packages/persistence/src/session-repository.ts packages/persistence/src/session-repository.test.ts
