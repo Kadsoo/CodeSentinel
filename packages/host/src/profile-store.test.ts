@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { lstat, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -266,6 +266,50 @@ describe("profile store", () => {
       ]);
       expect(hookRan).toBe(true);
       expect(await readFile(outsidePath, "utf8")).toHaveLength(65_537);
+    });
+  });
+
+  it("returns a complete snapshot when a cooperative writer atomically replaces profiles after precheck", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const profilePath = join(stateDirectory, profilesFileName);
+      const replacementPath = join(stateDirectory, "profiles.replacement.json");
+      const replacementProfile = {
+        id: "nju-replacement",
+        kind: "nju_se_hub" as const,
+        endpoint: "https://hub.example.edu/v1/chat/completions",
+        model: "course-model",
+        credentialRef: "nju-replacement",
+      };
+      const initialStore = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "reader-replacement-initial",
+      });
+      await initialStore.upsert(validProfile);
+      await writeFile(
+        replacementPath,
+        JSON.stringify({ version: 1, profiles: [replacementProfile] }),
+        "utf8",
+      );
+      let swapped = false;
+      const reader = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "reader-replacement",
+        testHooks: {
+          afterProfileFilePrecheck: async () => {
+            if (!swapped) {
+              swapped = true;
+              await rename(replacementPath, profilePath);
+            }
+          },
+        },
+      });
+
+      const profiles = await reader.list();
+
+      expect(swapped).toBe(true);
+      expect(profiles).toEqual([replacementProfile]);
+      expect(await reader.get(replacementProfile.id)).toEqual(replacementProfile);
     });
   });
 

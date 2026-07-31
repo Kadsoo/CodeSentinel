@@ -19,6 +19,8 @@ const KNOWN_SECRET_FRAGMENT = /(?:sk-|sk_|pk_|rk_|ghp_)[A-Za-z0-9_-]{12,}/iu;
 const LOCK_ACQUISITION_ATTEMPTS = 20;
 const LOCK_RETRY_DELAY_MS = 5;
 const LOCK_STALE_AFTER_MS = 30_000;
+const PROFILE_READ_ATTEMPTS = 3;
+const PROFILE_READ_RETRY_DELAY_MS = 2;
 
 const IdentifierSchema = z
   .string()
@@ -408,6 +410,19 @@ class FileProfileStore implements ProfileStore {
   }
 
   async #readEnvelope(): Promise<ProfileEnvelope> {
+    for (let attempt = 0; attempt < PROFILE_READ_ATTEMPTS; attempt += 1) {
+      const result = await this.#readEnvelopeAttempt();
+      if (result !== "changed") {
+        return result;
+      }
+      if (attempt + 1 < PROFILE_READ_ATTEMPTS) {
+        await delay(PROFILE_READ_RETRY_DELAY_MS);
+      }
+    }
+    throw hostError("STATE_UNAVAILABLE");
+  }
+
+  async #readEnvelopeAttempt(): Promise<ProfileEnvelope | "changed"> {
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       const before = await this.#profileFileStatus();
@@ -419,15 +434,27 @@ class FileProfileStore implements ProfileStore {
       handle = await open(this.#profilePath, "r");
       const opened = validatedRegularProfileFile(await handle.stat());
       if (!hasSameIdentity(before.identity, opened)) {
-        throw hostError("STATE_CORRUPT");
+        return "changed";
       }
-      await this.#assertProfileFileUnchanged(before);
+      const afterOpen = await this.#profileFileStatus();
+      if (
+        afterOpen === "missing" ||
+        !hasSameIdentity(before.identity, afterOpen.identity)
+      ) {
+        return "changed";
+      }
       const contents = await this.#readBoundedFile(handle, before.identity.size);
       const afterRead = validatedRegularProfileFile(await handle.stat());
       if (!hasSameIdentity(before.identity, afterRead)) {
-        throw hostError("STATE_CORRUPT");
+        return "changed";
       }
-      await this.#assertProfileFileUnchanged(before);
+      const afterReadPath = await this.#profileFileStatus();
+      if (
+        afterReadPath === "missing" ||
+        !hasSameIdentity(before.identity, afterReadPath.identity)
+      ) {
+        return "changed";
+      }
 
       let parsedJson: unknown;
       try {
@@ -443,6 +470,9 @@ class FileProfileStore implements ProfileStore {
     } catch (error) {
       if (isHostError(error)) {
         throw error;
+      }
+      if (nodeErrorCode(error) === "ENOENT") {
+        return "changed";
       }
       throw hostError("STATE_UNAVAILABLE");
     } finally {
