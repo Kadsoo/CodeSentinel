@@ -7,3 +7,16 @@ export type {
   ProfileStoreTestHooks,
   ProviderProfile,
 } from "./profile-store.js";
+export { createWorkspaceConfigLoader, workspaceIdFor } from "./workspace-config.js";
+export type {
+  LoadedWorkspace,
+  WorkspaceConfigLoader,
+  WorkspaceConfigLoadInput,
+} from "./workspace-config.js";
+export { createWorkspaceRuntime } from "./runtime.js";
+export type {
+  CreateWorkspaceRuntimeDependencies,
+  CreateWorkspaceRuntimeInput,
+  ProviderFactory,
+  WorkspaceRuntime,
+} from "./runtime.js";
