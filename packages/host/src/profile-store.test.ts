@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { lstat, mkdtemp, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -61,6 +62,92 @@ async function expectHostError(
   expect(captured).not.toHaveProperty("cause");
   expect(captured).not.toHaveProperty("input");
   expect(String(captured)).not.toContain(SECRET_SENTINEL);
+}
+
+type ExternalUpsert = Readonly<{
+  started: Promise<void>;
+  completed: Promise<Readonly<{ exitCode: number | null; output: string }>>;
+  hasCompleted: () => boolean;
+}>;
+
+function startExternalProcess(
+  helper: string,
+  arguments_: readonly string[],
+): ExternalUpsert {
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", helper, ...arguments_],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let resolveStarted: (() => void) | undefined;
+  let rejectStarted: ((error: Error) => void) | undefined;
+  let hasStarted = false;
+  let hasCompleted = false;
+  let output = "";
+  const started = new Promise<void>((resolve, reject) => {
+    resolveStarted = resolve;
+    rejectStarted = reject;
+  });
+  const completed = new Promise<Readonly<{ exitCode: number | null; output: string }>>(
+    (resolve) => {
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        output += chunk;
+        if (!hasStarted && output.includes("started\n")) {
+          hasStarted = true;
+          resolveStarted?.();
+        }
+      });
+      child.stderr.on("data", (chunk: string) => {
+        output += chunk;
+      });
+      child.on("error", (error: Error) => {
+        if (!hasStarted) {
+          rejectStarted?.(error);
+        }
+      });
+      child.on("close", (exitCode) => {
+        hasCompleted = true;
+        if (!hasStarted) {
+          rejectStarted?.(new Error(`External profile writer exited before starting: ${output}`));
+        }
+        resolve({ exitCode, output });
+      });
+    },
+  );
+  return Object.freeze({
+    started,
+    completed,
+    hasCompleted: () => hasCompleted,
+  });
+}
+
+function startExternalUpsert(
+  stateDirectory: string,
+  profile: object,
+): ExternalUpsert {
+  const helper = [
+    `import { createProfileStore } from ${JSON.stringify(new URL("./index.ts", import.meta.url).href)};`,
+    "const [stateDirectory, profileJson] = process.argv.slice(1);",
+    "process.stdout.write('started\\n');",
+    "await createProfileStore({ stateDirectory, randomSuffix: () => 'external-sqlite' }).upsert(JSON.parse(profileJson));",
+    "process.stdout.write('completed\\n');",
+  ].join("\n");
+  return startExternalProcess(helper, [stateDirectory, JSON.stringify(profile)]);
+}
+
+function startExternalLockHolder(lockDatabasePath: string): ExternalUpsert {
+  const helper = [
+    "import Database from 'better-sqlite3';",
+    "const [lockDatabasePath] = process.argv.slice(1);",
+    "const database = new Database(lockDatabasePath);",
+    "database.pragma('journal_mode = DELETE');",
+    "database.exec('BEGIN IMMEDIATE');",
+    "process.stdout.write('started\\n');",
+    "setTimeout(() => { database.exec('COMMIT'); database.close(); process.stdout.write('completed\\n'); }, 1500);",
+  ].join("\n");
+  return startExternalProcess(helper, [lockDatabasePath]);
 }
 
 describe("profile store", () => {
@@ -150,89 +237,210 @@ describe("profile store", () => {
     });
   });
 
-  it("recovers a demonstrably expired lock with a dead owner", async () => {
+  it("queues a second store while the first holds a controlled write boundary", async () => {
     await withStateDirectory(async (stateDirectory) => {
       const { createProfileStore } = await host();
-      const lockPath = join(stateDirectory, "profiles.lock");
-      await writeFile(
-        lockPath,
-        JSON.stringify({
-          version: 1,
-          owner: "abandoned-owner",
-          processId: 42,
-          acquiredAt: 0,
-        }),
-        "utf8",
-      );
-      const store = createProfileStore({
-        stateDirectory,
-        randomSuffix: () => "recovered-lock",
-        now: () => 60_001,
-        isLockOwnerAlive: () => false,
+      let enteredFirstWrite: (() => void) | undefined;
+      let releaseFirstWrite: (() => void) | undefined;
+      const firstEntered = new Promise<void>((resolve) => {
+        enteredFirstWrite = resolve;
       });
-
-      await store.upsert(validProfile);
-
-      expect(await store.get(validProfile.id)).toEqual(validProfile);
-      expect(existsSync(lockPath)).toBe(false);
-    });
-  });
-
-  it("recovers an expired legacy empty lock left before ownership metadata was written", async () => {
-    await withStateDirectory(async (stateDirectory) => {
-      const { createProfileStore } = await host();
-      const lockPath = join(stateDirectory, "profiles.lock");
-      await writeFile(lockPath, "", "utf8");
-      await utimes(lockPath, 0, 0);
-      const store = createProfileStore({
-        stateDirectory,
-        randomSuffix: () => "recovered-legacy-lock",
-        now: () => 60_001,
+      const firstRelease = new Promise<void>((resolve) => {
+        releaseFirstWrite = resolve;
       });
-
-      await store.upsert(validProfile);
-
-      expect(await store.get(validProfile.id)).toEqual(validProfile);
-      expect(existsSync(lockPath)).toBe(false);
-    });
-  });
-
-  it("recovers an expired stable partial lock left during payload publication", async () => {
-    await withStateDirectory(async (stateDirectory) => {
-      const { createProfileStore } = await host();
-      const lockPath = join(stateDirectory, "profiles.lock");
-      await writeFile(lockPath, '{"version":1,"owner":"partial', "utf8");
-      await utimes(lockPath, 0, 0);
-      const store = createProfileStore({
+      let secondReachedWriteBoundary = false;
+      const first = createProfileStore({
         stateDirectory,
-        randomSuffix: () => "recovered-partial-lock",
-        now: () => 60_001,
-      });
-
-      await store.upsert(validProfile);
-
-      expect(await store.get(validProfile.id)).toEqual(validProfile);
-      expect(existsSync(lockPath)).toBe(false);
-    });
-  });
-
-  it("cleans up its own new lock when lock synchronization fails", async () => {
-    await withStateDirectory(async (stateDirectory) => {
-      const { createProfileStore } = await host();
-      const lockPath = join(stateDirectory, "profiles.lock");
-      const store = createProfileStore({
-        stateDirectory,
-        randomSuffix: () => "lock-sync-failure",
+        randomSuffix: () => "sqlite-queue-first",
         testHooks: {
-          beforeLockSync: async () => {
-            throw new Error("simulated lock synchronization failure");
+          beforeAtomicReplace: async () => {
+            enteredFirstWrite?.();
+            await firstRelease;
           },
         },
       });
+      const second = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "sqlite-queue-second",
+        testHooks: {
+          beforeAtomicReplace: async () => {
+            secondReachedWriteBoundary = true;
+          },
+        },
+      });
+      const njuProfile = {
+        id: "nju-queued",
+        kind: "nju_se_hub" as const,
+        endpoint: "https://hub.example.edu/v1/chat/completions",
+        model: "course-model",
+        credentialRef: "nju-queued",
+      };
+
+      const firstWrite = first.upsert(validProfile);
+      await firstEntered;
+      const secondWrite = second.upsert(njuProfile);
+      const secondOutcome = secondWrite.then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      await new Promise((resolve) => {
+        setTimeout(resolve, 400);
+      });
+      expect(secondReachedWriteBoundary).toBe(false);
+      releaseFirstWrite?.();
+      await firstWrite;
+      const completedSecondWrite = await secondOutcome;
+      if (!completedSecondWrite.ok) {
+        throw completedSecondWrite.error;
+      }
+
+      expect(secondReachedWriteBoundary).toBe(true);
+      expect(await first.list()).toEqual([validProfile, njuProfile]);
+      expect(existsSync(join(stateDirectory, "profiles.lock"))).toBe(false);
+    });
+  });
+
+  it("serializes an external process while a local SQLite transaction is open", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      let enteredFirstWrite: (() => void) | undefined;
+      let releaseFirstWrite: (() => void) | undefined;
+      const firstEntered = new Promise<void>((resolve) => {
+        enteredFirstWrite = resolve;
+      });
+      const firstRelease = new Promise<void>((resolve) => {
+        releaseFirstWrite = resolve;
+      });
+      const first = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "sqlite-process-first",
+        testHooks: {
+          beforeAtomicReplace: async () => {
+            enteredFirstWrite?.();
+            await firstRelease;
+          },
+        },
+      });
+      const njuProfile = {
+        id: "nju-external",
+        kind: "nju_se_hub" as const,
+        endpoint: "https://hub.example.edu/v1/chat/completions",
+        model: "course-model",
+        credentialRef: "nju-external",
+      };
+
+      const firstWrite = first.upsert(validProfile);
+      await firstEntered;
+      const external = startExternalUpsert(stateDirectory, njuProfile);
+      await external.started;
+      await new Promise((resolve) => {
+        setTimeout(resolve, 400);
+      });
+      expect(external.hasCompleted()).toBe(false);
+
+      releaseFirstWrite?.();
+      await firstWrite;
+      const externalResult = await external.completed;
+      expect(externalResult).toMatchObject({ exitCode: 0, output: "started\ncompleted\n" });
+      expect(await first.list()).toEqual([validProfile, njuProfile]);
+    });
+  });
+
+  it("fails within the SQLite busy timeout and recovers after an external transaction releases", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const lockDatabasePath = join(stateDirectory, ".profiles.lock.sqlite");
+      const store = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "sqlite-busy-timeout",
+      });
+      await store.upsert({ ...validProfile, id: "initial-profile", credentialRef: "initial-profile" });
+      const external = startExternalLockHolder(lockDatabasePath);
+      await external.started;
 
       await expectHostError(() => store.upsert(validProfile), "STATE_UNAVAILABLE");
-      expect(existsSync(lockPath)).toBe(false);
+      expect(await store.get(validProfile.id)).toBeUndefined();
+
+      const externalResult = await external.completed;
+      expect(externalResult).toMatchObject({ exitCode: 0, output: "started\ncompleted\n" });
+      await store.upsert(validProfile);
+      expect(await store.get(validProfile.id)).toEqual(validProfile);
+    });
+  });
+
+  it("ignores a legacy profiles.lock file rather than allowing it to block writes", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const legacyLockPath = join(stateDirectory, "profiles.lock");
+      await writeFile(legacyLockPath, "legacy lock is not coordination state", "utf8");
+      const store = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "sqlite-ignores-legacy",
+      });
+
+      await store.upsert(validProfile);
+
+      expect(await store.get(validProfile.id)).toEqual(validProfile);
+      expect(await readFile(legacyLockPath, "utf8")).toBe(
+        "legacy lock is not coordination state",
+      );
+    });
+  });
+
+  it("fails closed when the SQLite lock database path is a symlink", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const lockDatabasePath = join(stateDirectory, ".profiles.lock.sqlite");
+      const outsidePath = join(stateDirectory, "outside-lock-directory");
+      await mkdir(outsidePath);
+      await symlink(outsidePath, lockDatabasePath, "junction");
+      const store = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "sqlite-lock-symlink",
+      });
+
+      await expectHostError(() => store.upsert(validProfile), "STATE_UNAVAILABLE");
       expect(existsSync(join(stateDirectory, profilesFileName))).toBe(false);
+      expect(existsSync(outsidePath)).toBe(true);
+    });
+  });
+
+  it("fails closed when the SQLite lock database path is nonregular", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const lockDatabasePath = join(stateDirectory, ".profiles.lock.sqlite");
+      await mkdir(lockDatabasePath);
+      const store = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "sqlite-lock-directory",
+      });
+
+      await expectHostError(() => store.upsert(validProfile), "STATE_UNAVAILABLE");
+      expect(existsSync(join(stateDirectory, profilesFileName))).toBe(false);
+    });
+  });
+
+  it("rolls back and closes the SQLite transaction when atomic publication fails", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const failingStore = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "sqlite-rollback-failure",
+        testHooks: {
+          beforeAtomicReplace: async () => {
+            throw new Error("simulated atomic publication failure");
+          },
+        },
+      });
+      const recoveringStore = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "sqlite-rollback-recovery",
+      });
+
+      await expectHostError(() => failingStore.upsert(validProfile), "STATE_UNAVAILABLE");
+      await recoveringStore.upsert(validProfile);
+
+      expect(await recoveringStore.get(validProfile.id)).toEqual(validProfile);
     });
   });
 

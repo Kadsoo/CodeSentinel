@@ -4,6 +4,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
+    "better-sqlite3": "13.0.1",
     "zod": "4.4.3"
   }
 }

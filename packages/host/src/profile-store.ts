@@ -1,14 +1,14 @@
-import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { basename, join } from "node:path";
+import Database from "better-sqlite3";
 import { z } from "zod";
 import { HostError, hostError } from "./errors.js";
 
 const PROFILES_FILE_NAME = "profiles.json";
-const PROFILES_LOCK_FILE_NAME = "profiles.lock";
+const PROFILES_LOCK_DATABASE_FILE_NAME = ".profiles.lock.sqlite";
 const PROFILES_VERSION = 1;
 const MAX_PROFILES_FILE_BYTES = 65_536;
-const MAX_LOCK_FILE_BYTES = 512;
 const MAX_PROFILES = 64;
 const MAX_IDENTIFIER_LENGTH = 128;
 const MAX_ENDPOINT_LENGTH = 2_048;
@@ -16,9 +16,7 @@ const MAX_MODEL_LENGTH = 128;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 const SAFE_TEMP_SUFFIX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const KNOWN_SECRET_FRAGMENT = /(?:sk-|sk_|pk_|rk_|ghp_)[A-Za-z0-9_-]{12,}/iu;
-const LOCK_ACQUISITION_ATTEMPTS = 20;
-const LOCK_RETRY_DELAY_MS = 5;
-const LOCK_STALE_AFTER_MS = 30_000;
+const SQLITE_BUSY_TIMEOUT_MS = 1_000;
 const PROFILE_READ_ATTEMPTS = 3;
 const PROFILE_READ_RETRY_DELAY_MS = 2;
 
@@ -74,15 +72,6 @@ const ProfileEnvelopeSchema = z
     });
   });
 
-const LockEnvelopeSchema = z
-  .object({
-    version: z.literal(1),
-    owner: z.string().min(1).max(64).regex(SAFE_TEMP_SUFFIX),
-    processId: z.number().int().safe().positive(),
-    acquiredAt: z.number().int().safe().nonnegative(),
-  })
-  .strict();
-
 export type ProviderProfile = Readonly<{
   id: string;
   kind: "deepseek" | "nju_se_hub";
@@ -101,24 +90,18 @@ export interface ProfileStore {
 export type ProfileStoreOptions = Readonly<{
   stateDirectory: string;
   randomSuffix?: () => string;
-  now?: () => number;
-  isLockOwnerAlive?: (processId: number) => boolean;
   testHooks?: ProfileStoreTestHooks;
 }>;
 
 export type ProfileStoreTestHooks = Readonly<{
   afterProfileFilePrecheck?: () => Promise<void>;
   beforeAtomicReplace?: () => Promise<void>;
-  beforeLockSync?: () => Promise<void>;
-  beforeLockStat?: () => Promise<void>;
 }>;
 
 type ProfileEnvelope = Readonly<{
   version: 1;
   profiles: readonly ProviderProfile[];
 }>;
-
-type LockEnvelope = Readonly<z.infer<typeof LockEnvelopeSchema>>;
 
 type RegularFileIdentity = Readonly<{
   dev: number;
@@ -131,18 +114,6 @@ type RegularFileIdentity = Readonly<{
 type ProfileFileStatus =
   | "missing"
   | Readonly<{ kind: "regular"; identity: RegularFileIdentity }>;
-
-type OwnedDirectoryLock = Readonly<{
-  handle: Awaited<ReturnType<typeof open>>;
-  identity: RegularFileIdentity;
-  owner: string;
-}>;
-
-type ExistingDirectoryLock = Readonly<{
-  identity: RegularFileIdentity;
-  acquiredAt: number;
-  processId: number | undefined;
-}>;
 
 function hasControlCharacter(value: string): boolean {
   for (const character of value) {
@@ -203,11 +174,10 @@ function validatedRegularProfileFile(status: Stats): RegularFileIdentity {
   return regularFileIdentity(status);
 }
 
-function validatedRegularLockFile(status: Stats): RegularFileIdentity {
-  if (status.isSymbolicLink() || !status.isFile() || status.size > MAX_LOCK_FILE_BYTES) {
+function assertRegularLockDatabaseFile(status: Stats): void {
+  if (status.isSymbolicLink() || !status.isFile()) {
     throw hostError("STATE_UNAVAILABLE");
   }
-  return regularFileIdentity(status);
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -286,58 +256,52 @@ function defaultRandomSuffix(): string {
   return Math.random().toString(36).slice(2);
 }
 
-function defaultLockOwnerAlive(processId: number): boolean {
-  try {
-    process.kill(processId, 0);
-    return true;
-  } catch (error) {
-    return nodeErrorCode(error) !== "ESRCH";
-  }
-}
-
-function validatedNow(value: unknown): number {
-  if (
-    typeof value !== "number" ||
-    !Number.isSafeInteger(value) ||
-    value < 0
-  ) {
-    throw hostError("STATE_UNAVAILABLE");
-  }
-  return value;
-}
-
 /**
  * The local state directory is a cooperative trust boundary: its ACL must exclude
- * untrusted writers, and CodeSentinel API/CLI instances must follow this lock
- * protocol. Node cannot make pathname compare-and-delete atomic against an
- * arbitrary same-privilege mutator. Handle/lstat identity checks fail closed for
- * static and racing corruption before reads, but do not replace directory ACLs.
+ * untrusted writers. Mutating CodeSentinel API/CLI instances coordinate through
+ * a same-directory SQLite `BEGIN IMMEDIATE` transaction, while `profiles.json`
+ * is still published by write, sync, close, and rename. SQLite locking and the
+ * path checks below do not protect against arbitrary same-privilege mutation, so
+ * they do not replace the directory ACL requirement.
  */
+
+const profileMutationQueues = new Map<string, Promise<void>>();
+
+function enqueueProfileMutation<T>(
+  canonicalStateDirectory: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const predecessor = profileMutationQueues.get(canonicalStateDirectory) ?? Promise.resolve();
+  const result = predecessor.then(operation, operation);
+  const completion = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  profileMutationQueues.set(canonicalStateDirectory, completion);
+  void completion.then(() => {
+    if (profileMutationQueues.get(canonicalStateDirectory) === completion) {
+      profileMutationQueues.delete(canonicalStateDirectory);
+    }
+  });
+  return result;
+}
 
 class FileProfileStore implements ProfileStore {
   readonly #stateDirectory: string;
   readonly #profilePath: string;
-  readonly #lockPath: string;
+  readonly #lockDatabasePath: string;
   readonly #randomSuffix: () => string;
-  readonly #now: () => number;
-  readonly #isLockOwnerAlive: (processId: number) => boolean;
   readonly #testHooks: ProfileStoreTestHooks;
-  #pending: Promise<void> = Promise.resolve();
 
   constructor(options: ProfileStoreOptions) {
     this.#stateDirectory = validateStateDirectory(options.stateDirectory);
     this.#profilePath = join(this.#stateDirectory, PROFILES_FILE_NAME);
-    this.#lockPath = join(this.#stateDirectory, PROFILES_LOCK_FILE_NAME);
+    this.#lockDatabasePath = join(
+      this.#stateDirectory,
+      PROFILES_LOCK_DATABASE_FILE_NAME,
+    );
     this.#randomSuffix = options.randomSuffix ?? defaultRandomSuffix;
     if (typeof this.#randomSuffix !== "function") {
-      throw hostError("STATE_UNAVAILABLE");
-    }
-    this.#now = options.now ?? Date.now;
-    this.#isLockOwnerAlive = options.isLockOwnerAlive ?? defaultLockOwnerAlive;
-    if (
-      typeof this.#now !== "function" ||
-      typeof this.#isLockOwnerAlive !== "function"
-    ) {
       throw hostError("STATE_UNAVAILABLE");
     }
     this.#testHooks = options.testHooks ?? {};
@@ -347,11 +311,7 @@ class FileProfileStore implements ProfileStore {
       (this.#testHooks.afterProfileFilePrecheck !== undefined &&
         typeof this.#testHooks.afterProfileFilePrecheck !== "function") ||
       (this.#testHooks.beforeAtomicReplace !== undefined &&
-        typeof this.#testHooks.beforeAtomicReplace !== "function") ||
-      (this.#testHooks.beforeLockSync !== undefined &&
-        typeof this.#testHooks.beforeLockSync !== "function") ||
-      (this.#testHooks.beforeLockStat !== undefined &&
-        typeof this.#testHooks.beforeLockStat !== "function")
+        typeof this.#testHooks.beforeAtomicReplace !== "function")
     ) {
       throw hostError("STATE_UNAVAILABLE");
     }
@@ -369,44 +329,31 @@ class FileProfileStore implements ProfileStore {
 
   async upsert(profile: ProviderProfile): Promise<void> {
     const validated = validateProfile(profile);
-    await this.#enqueue(() =>
-      this.#withDirectoryLock(async () => {
-        const current = await this.#readEnvelope();
-        const existingIndex = current.profiles.findIndex(
-          (candidate) => candidate.id === validated.id,
-        );
-        const profiles = [...current.profiles];
-        if (existingIndex === -1) {
-          profiles.push(validated);
-        } else {
-          profiles[existingIndex] = validated;
-        }
-        await this.#writeEnvelope({ version: PROFILES_VERSION, profiles });
-      }),
-    );
+    await this.#withProfileTransaction(async () => {
+      const current = await this.#readEnvelope();
+      const existingIndex = current.profiles.findIndex(
+        (candidate) => candidate.id === validated.id,
+      );
+      const profiles = [...current.profiles];
+      if (existingIndex === -1) {
+        profiles.push(validated);
+      } else {
+        profiles[existingIndex] = validated;
+      }
+      await this.#writeEnvelope({ version: PROFILES_VERSION, profiles });
+    });
   }
 
   async remove(id: string): Promise<void> {
     const profileId = validateIdentifier(id);
-    await this.#enqueue(() =>
-      this.#withDirectoryLock(async () => {
-        const current = await this.#readEnvelope();
-        const profiles = current.profiles.filter((profile) => profile.id !== profileId);
-        if (profiles.length === current.profiles.length) {
-          throw hostError("PROFILE_NOT_FOUND");
-        }
-        await this.#writeEnvelope({ version: PROFILES_VERSION, profiles });
-      }),
-    );
-  }
-
-  async #enqueue(operation: () => Promise<void>): Promise<void> {
-    const result = this.#pending.then(operation, operation);
-    this.#pending = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+    await this.#withProfileTransaction(async () => {
+      const current = await this.#readEnvelope();
+      const profiles = current.profiles.filter((profile) => profile.id !== profileId);
+      if (profiles.length === current.profiles.length) {
+        throw hostError("PROFILE_NOT_FOUND");
+      }
+      await this.#writeEnvelope({ version: PROFILES_VERSION, profiles });
+    });
   }
 
   async #readEnvelope(): Promise<ProfileEnvelope> {
@@ -569,242 +516,87 @@ class FileProfileStore implements ProfileStore {
     }
   }
 
-  async #withDirectoryLock<T>(operation: () => Promise<T>): Promise<T> {
-    const lock = await this.#acquireDirectoryLock();
-    try {
-      return await operation();
-    } finally {
-      await this.#releaseDirectoryLock(lock);
-    }
-  }
-
-  async #acquireDirectoryLock(): Promise<OwnedDirectoryLock> {
+  async #withProfileTransaction<T>(operation: () => Promise<T>): Promise<T> {
     await this.#ensureStateDirectory();
-
-    for (let attempt = 0; attempt < LOCK_ACQUISITION_ATTEMPTS; attempt += 1) {
-      let handle: Awaited<ReturnType<typeof open>> | undefined;
-      try {
-        handle = await open(this.#lockPath, "wx", 0o600);
-        const owner = this.#newLockOwner();
-        const lock: LockEnvelope = {
-          version: 1,
-          owner,
-          processId: process.pid,
-          acquiredAt: this.#currentTime(),
-        };
-        await handle.writeFile(JSON.stringify(lock), "utf8");
-        await this.#runTestHook("beforeLockSync");
-        await handle.sync();
-        await this.#runTestHook("beforeLockStat");
-        const identity = validatedRegularLockFile(await handle.stat());
-        return Object.freeze({ handle, identity, owner });
-      } catch (error) {
-        if (handle !== undefined) {
-          await this.#discardOwnedOpenPath(this.#lockPath, handle, "lock");
-        }
-        if (nodeErrorCode(error) !== "EEXIST") {
-          if (isHostError(error)) {
-            throw error;
-          }
-          throw hostError("STATE_UNAVAILABLE");
-        }
-        if (await this.#recoverStaleDirectoryLock()) {
-          continue;
-        }
-        await delay(LOCK_RETRY_DELAY_MS);
-      }
-    }
-
-    throw hostError("STATE_UNAVAILABLE");
-  }
-
-  async #recoverStaleDirectoryLock(): Promise<boolean> {
-    const existing = await this.#readExistingDirectoryLock();
-    if (existing === "missing" || existing === "changed") {
-      return true;
-    }
-    const now = this.#currentTime();
-    if (now - existing.acquiredAt < LOCK_STALE_AFTER_MS) {
-      return false;
-    }
-    if (existing.processId !== undefined && this.#lockOwnerIsAlive(existing.processId)) {
-      return false;
-    }
-    return this.#removeOwnedClosedPath(this.#lockPath, existing.identity, "lock");
-  }
-
-  async #readExistingDirectoryLock(): Promise<
-    ExistingDirectoryLock | "missing" | "changed"
-  > {
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let canonicalStateDirectory: string;
     try {
-      const before = await this.#lockFileStatus();
-      if (before === "missing") {
-        return "missing";
-      }
-      handle = await open(this.#lockPath, "r");
-      const opened = validatedRegularLockFile(await handle.stat());
-      if (!hasSameIdentity(before.identity, opened)) {
-        return "changed";
-      }
-      const afterOpen = await this.#lockFileStatus();
-      if (
-        afterOpen === "missing" ||
-        !hasSameIdentity(before.identity, afterOpen.identity)
-      ) {
-        return "changed";
-      }
-      const contents = await this.#readBoundedFile(handle, before.identity.size);
-      const afterRead = validatedRegularLockFile(await handle.stat());
-      if (!hasSameIdentity(before.identity, afterRead)) {
-        return "changed";
-      }
-      const afterReadPath = await this.#lockFileStatus();
-      if (
-        afterReadPath === "missing" ||
-        !hasSameIdentity(before.identity, afterReadPath.identity)
-      ) {
-        return "changed";
-      }
-
-      if (contents.length === 0) {
-        return this.#legacyDirectoryLock(before.identity);
-      }
-
-      let parsedJson: unknown;
-      try {
-        parsedJson = JSON.parse(contents.toString("utf8")) as unknown;
-      } catch {
-        return this.#legacyDirectoryLock(before.identity);
-      }
-      const parsedLock = LockEnvelopeSchema.safeParse(parsedJson);
-      if (!parsedLock.success) {
-        return this.#legacyDirectoryLock(before.identity);
-      }
-      return Object.freeze({
-        identity: before.identity,
-        acquiredAt: parsedLock.data.acquiredAt,
-        processId: parsedLock.data.processId,
-      });
-    } catch (error) {
-      if (isHostError(error)) {
-        throw error;
-      }
-      if (nodeErrorCode(error) === "ENOENT") {
-        return "changed";
-      }
+      canonicalStateDirectory = await realpath(this.#stateDirectory);
+    } catch {
       throw hostError("STATE_UNAVAILABLE");
-    } finally {
-      if (handle !== undefined) {
-        try {
-          await handle.close();
-        } catch {
-          // A failed close never exposes a native filesystem error.
-        }
-      }
     }
-  }
-
-  #legacyDirectoryLock(identity: RegularFileIdentity): ExistingDirectoryLock {
-    return Object.freeze({
-      identity,
-      acquiredAt: validatedNow(Math.floor(identity.mtimeMs)),
-      processId: undefined,
+    return enqueueProfileMutation(canonicalStateDirectory, async () => {
+      await this.#ensureStateDirectory();
+      await this.#assertLockDatabasePathIsSafe();
+      return this.#runSqliteTransaction(operation);
     });
   }
 
-  async #lockFileStatus(): Promise<ProfileFileStatus> {
+  async #assertLockDatabasePathIsSafe(): Promise<void> {
     try {
-      const status = await lstat(this.#lockPath);
-      return Object.freeze({
-        kind: "regular",
-        identity: validatedRegularLockFile(status),
-      });
+      assertRegularLockDatabaseFile(await lstat(this.#lockDatabasePath));
     } catch (error) {
       if (isHostError(error)) {
         throw error;
       }
       if (nodeErrorCode(error) === "ENOENT") {
-        return "missing";
+        return;
       }
       throw hostError("STATE_UNAVAILABLE");
     }
   }
 
-  #newLockOwner(): string {
-    let owner: string;
-    try {
-      owner = this.#randomSuffix();
-    } catch {
-      throw hostError("STATE_UNAVAILABLE");
-    }
-    if (typeof owner !== "string" || !SAFE_TEMP_SUFFIX.test(owner)) {
-      throw hostError("STATE_UNAVAILABLE");
-    }
-    return owner;
-  }
+  async #runSqliteTransaction<T>(operation: () => Promise<T>): Promise<T> {
+    let database: Database.Database | undefined;
+    let transactionStarted = false;
+    let failure: unknown;
+    let result: T | undefined;
 
-  #currentTime(): number {
     try {
-      return validatedNow(this.#now());
-    } catch (error) {
-      if (isHostError(error)) {
-        throw error;
-      }
-      throw hostError("STATE_UNAVAILABLE");
-    }
-  }
-
-  #lockOwnerIsAlive(processId: number): boolean {
-    try {
-      const alive = this.#isLockOwnerAlive(processId);
-      if (typeof alive !== "boolean") {
+      database = new Database(this.#lockDatabasePath);
+      database.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+      const journalMode = String(
+        database.pragma("journal_mode = DELETE", { simple: true }),
+      ).toLowerCase();
+      if (journalMode !== "delete") {
         throw hostError("STATE_UNAVAILABLE");
       }
-      return alive;
+      database.exec("BEGIN IMMEDIATE");
+      transactionStarted = true;
+      result = await operation();
+      database.exec("COMMIT");
+      transactionStarted = false;
     } catch (error) {
-      if (isHostError(error)) {
-        throw error;
+      failure = isHostError(error) ? error : hostError("STATE_UNAVAILABLE");
+    } finally {
+      if (transactionStarted) {
+        try {
+          database?.exec("ROLLBACK");
+        } catch {
+          // The original failure remains the externally visible stable error.
+        }
       }
-      throw hostError("STATE_UNAVAILABLE");
-    }
-  }
-
-  async #releaseDirectoryLock(lock: OwnedDirectoryLock): Promise<void> {
-    let currentIdentity: RegularFileIdentity;
-    try {
-      currentIdentity = validatedRegularLockFile(await lock.handle.stat());
-    } catch {
       try {
-        await lock.handle.close();
+        database?.close();
       } catch {
-        // A failed close never exposes a native filesystem error.
+        if (failure === undefined) {
+          failure = hostError("STATE_UNAVAILABLE");
+        }
       }
-      throw hostError("STATE_UNAVAILABLE");
     }
-    try {
-      await lock.handle.close();
-    } catch {
-      throw hostError("STATE_UNAVAILABLE");
+
+    if (failure !== undefined) {
+      throw failure;
     }
-    if (!hasSameIdentity(lock.identity, currentIdentity)) {
-      return;
-    }
-    await this.#removeOwnedClosedPath(this.#lockPath, lock.identity, "lock");
+    return result as T;
   }
 
-  async #discardOwnedOpenPath(
+  async #discardOwnedOpenTemporaryFile(
     path: string,
     handle: Awaited<ReturnType<typeof open>>,
-    kind: "lock" | "temporary",
   ): Promise<void> {
     let identity: RegularFileIdentity | undefined;
     try {
-      const status = await handle.stat();
-      identity =
-        kind === "lock"
-          ? validatedRegularLockFile(status)
-          : validatedRegularProfileFile(status);
+      identity = validatedRegularProfileFile(await handle.stat());
     } catch {
       // Without a handle identity, cleanup would be unsafe.
     }
@@ -815,24 +607,19 @@ class FileProfileStore implements ProfileStore {
     }
     if (identity !== undefined) {
       try {
-        await this.#removeOwnedClosedPath(path, identity, kind);
+        await this.#removeOwnedClosedTemporaryFile(path, identity);
       } catch {
         // The triggering operation already returns a stable error.
       }
     }
   }
 
-  async #removeOwnedClosedPath(
+  async #removeOwnedClosedTemporaryFile(
     path: string,
     expected: RegularFileIdentity,
-    kind: "lock" | "temporary",
   ): Promise<boolean> {
     try {
-      const status = await lstat(path);
-      const current =
-        kind === "lock"
-          ? validatedRegularLockFile(status)
-          : validatedRegularProfileFile(status);
+      const current = validatedRegularProfileFile(await lstat(path));
       if (!hasSameIdentity(expected, current)) {
         return false;
       }
@@ -892,15 +679,11 @@ class FileProfileStore implements ProfileStore {
       await rename(temporaryPath, this.#profilePath);
     } catch (error) {
       if (handle !== undefined) {
-        await this.#discardOwnedOpenPath(temporaryPath, handle, "temporary");
+        await this.#discardOwnedOpenTemporaryFile(temporaryPath, handle);
       }
       if (handle === undefined && temporaryIdentity !== undefined) {
         try {
-          await this.#removeOwnedClosedPath(
-            temporaryPath,
-            temporaryIdentity,
-            "temporary",
-          );
+          await this.#removeOwnedClosedTemporaryFile(temporaryPath, temporaryIdentity);
         } catch {
           // The outer operation intentionally exposes only a stable host error.
         }
