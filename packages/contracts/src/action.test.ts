@@ -91,6 +91,8 @@ describe("ActionSchema", () => {
 
   it("normalizes verification command ids for config lookup", () => {
     const config = CodeSentinelConfigSchema.parse({
+      providerProfileId: "deepseek-default",
+      allowedPaths: ["src/**"],
       verificationCommands: [
         {
           id: " test ",
