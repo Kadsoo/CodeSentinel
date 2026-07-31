@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 const SECRET_SENTINEL = "sk-profile-secret-sentinel-20260731";
 const profilesFileName = "profiles.json";
+const EXTERNAL_PROCESS_TIMEOUT_MS = 5_000;
 
 const validProfile = {
   id: "deepseek-default",
@@ -68,6 +69,7 @@ type ExternalUpsert = Readonly<{
   started: Promise<void>;
   completed: Promise<Readonly<{ exitCode: number | null; output: string }>>;
   hasCompleted: () => boolean;
+  terminateAndReap: () => Promise<void>;
 }>;
 
 function startExternalProcess(
@@ -88,38 +90,57 @@ function startExternalProcess(
     resolveStarted = resolve;
     rejectStarted = reject;
   });
-  const completed = new Promise<Readonly<{ exitCode: number | null; output: string }>>(
-    (resolve) => {
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        output += chunk;
-        if (!hasStarted && output.includes("started\n")) {
-          hasStarted = true;
-          resolveStarted?.();
-        }
-      });
-      child.stderr.on("data", (chunk: string) => {
-        output += chunk;
-      });
-      child.on("error", (error: Error) => {
-        if (!hasStarted) {
-          rejectStarted?.(error);
-        }
-      });
-      child.on("close", (exitCode) => {
-        hasCompleted = true;
-        if (!hasStarted) {
-          rejectStarted?.(new Error(`External profile writer exited before starting: ${output}`));
-        }
-        resolve({ exitCode, output });
-      });
-    },
-  );
+  let resolveCompleted: ((result: Readonly<{ exitCode: number | null; output: string }>) => void) | undefined;
+  const completed = new Promise<Readonly<{ exitCode: number | null; output: string }>>((resolve) => {
+    resolveCompleted = resolve;
+  });
+  const finish = (exitCode: number | null): void => {
+    if (hasCompleted) {
+      return;
+    }
+    hasCompleted = true;
+    clearTimeout(timeout);
+    if (!hasStarted) {
+      rejectStarted?.(new Error(`External profile writer exited before starting: ${output}`));
+    }
+    resolveCompleted?.({ exitCode, output });
+  };
+  const timeout = setTimeout(() => {
+    if (!hasCompleted) {
+      if (!hasStarted) {
+        rejectStarted?.(new Error(`External profile writer timed out before starting: ${output}`));
+      }
+      child.kill();
+    }
+  }, EXTERNAL_PROCESS_TIMEOUT_MS);
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    output += chunk;
+    if (!hasStarted && output.includes("started\n")) {
+      hasStarted = true;
+      resolveStarted?.();
+    }
+  });
+  child.stderr.on("data", (chunk: string) => {
+    output += chunk;
+  });
+  child.on("error", () => {
+    finish(null);
+  });
+  child.on("close", (exitCode) => {
+    finish(exitCode);
+  });
   return Object.freeze({
     started,
     completed,
     hasCompleted: () => hasCompleted,
+    terminateAndReap: async () => {
+      if (!hasCompleted) {
+        child.kill();
+      }
+      await completed;
+    },
   });
 }
 
@@ -151,6 +172,43 @@ function startExternalLockHolder(lockDatabasePath: string): ExternalUpsert {
 }
 
 describe("profile store", () => {
+  it("treats an absent initial state directory as empty without creating it", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const absentStateDirectory = join(stateDirectory, "absent-state");
+      const store = createProfileStore({
+        stateDirectory: absentStateDirectory,
+        randomSuffix: () => "absent-read-only",
+      });
+
+      expect(await store.list()).toEqual([]);
+      expect(await store.get(validProfile.id)).toBeUndefined();
+      expect(existsSync(absentStateDirectory)).toBe(false);
+    });
+  });
+
+  it("rejects reads through a junction state directory even when its target has a valid profile", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const targetStateDirectory = join(stateDirectory, "target-state");
+      const junctionStateDirectory = join(stateDirectory, "junction-state");
+      await mkdir(targetStateDirectory);
+      const writer = createProfileStore({
+        stateDirectory: targetStateDirectory,
+        randomSuffix: () => "junction-state-writer",
+      });
+      await writer.upsert(validProfile);
+      await symlink(targetStateDirectory, junctionStateDirectory, "junction");
+      const reader = createProfileStore({
+        stateDirectory: junctionStateDirectory,
+        randomSuffix: () => "junction-state-reader",
+      });
+
+      await expectHostError(() => reader.list(), "STATE_UNAVAILABLE");
+      await expectHostError(() => reader.get(validProfile.id), "STATE_UNAVAILABLE");
+    });
+  });
+
   it("round trips, orders, and removes non-secret provider profiles", async () => {
     await withStateDirectory(async (stateDirectory) => {
       const { createProfileStore } = await host();
@@ -332,17 +390,23 @@ describe("profile store", () => {
       const firstWrite = first.upsert(validProfile);
       await firstEntered;
       const external = startExternalUpsert(stateDirectory, njuProfile);
-      await external.started;
-      await new Promise((resolve) => {
-        setTimeout(resolve, 400);
-      });
-      expect(external.hasCompleted()).toBe(false);
+      try {
+        await external.started;
+        await new Promise((resolve) => {
+          setTimeout(resolve, 400);
+        });
+        expect(external.hasCompleted()).toBe(false);
 
-      releaseFirstWrite?.();
-      await firstWrite;
-      const externalResult = await external.completed;
-      expect(externalResult).toMatchObject({ exitCode: 0, output: "started\ncompleted\n" });
-      expect(await first.list()).toEqual([validProfile, njuProfile]);
+        releaseFirstWrite?.();
+        await firstWrite;
+        const externalResult = await external.completed;
+        expect(externalResult).toMatchObject({ exitCode: 0, output: "started\ncompleted\n" });
+        expect(await first.list()).toEqual([validProfile, njuProfile]);
+      } finally {
+        releaseFirstWrite?.();
+        await firstWrite.catch(() => undefined);
+        await external.terminateAndReap();
+      }
     });
   });
 
@@ -356,15 +420,19 @@ describe("profile store", () => {
       });
       await store.upsert({ ...validProfile, id: "initial-profile", credentialRef: "initial-profile" });
       const external = startExternalLockHolder(lockDatabasePath);
-      await external.started;
+      try {
+        await external.started;
 
-      await expectHostError(() => store.upsert(validProfile), "STATE_UNAVAILABLE");
-      expect(await store.get(validProfile.id)).toBeUndefined();
+        await expectHostError(() => store.upsert(validProfile), "STATE_UNAVAILABLE");
+        expect(await store.get(validProfile.id)).toBeUndefined();
 
-      const externalResult = await external.completed;
-      expect(externalResult).toMatchObject({ exitCode: 0, output: "started\ncompleted\n" });
-      await store.upsert(validProfile);
-      expect(await store.get(validProfile.id)).toEqual(validProfile);
+        const externalResult = await external.completed;
+        expect(externalResult).toMatchObject({ exitCode: 0, output: "started\ncompleted\n" });
+        await store.upsert(validProfile);
+        expect(await store.get(validProfile.id)).toEqual(validProfile);
+      } finally {
+        await external.terminateAndReap();
+      }
     });
   });
 

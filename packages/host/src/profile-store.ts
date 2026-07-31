@@ -319,11 +319,13 @@ class FileProfileStore implements ProfileStore {
 
   async get(id: string): Promise<ProviderProfile | undefined> {
     const profileId = validateIdentifier(id);
+    await this.#assertReadableStateDirectory();
     const envelope = await this.#readEnvelope();
     return envelope.profiles.find((profile) => profile.id === profileId);
   }
 
   async list(): Promise<readonly ProviderProfile[]> {
+    await this.#assertReadableStateDirectory();
     return (await this.#readEnvelope()).profiles;
   }
 
@@ -494,6 +496,23 @@ class FileProfileStore implements ProfileStore {
     } catch (error) {
       if (isHostError(error)) {
         throw error;
+      }
+      throw hostError("STATE_UNAVAILABLE");
+    }
+  }
+
+  async #assertReadableStateDirectory(): Promise<void> {
+    try {
+      const status = await lstat(this.#stateDirectory);
+      if (status.isSymbolicLink() || !status.isDirectory()) {
+        throw hostError("STATE_UNAVAILABLE");
+      }
+    } catch (error) {
+      if (isHostError(error)) {
+        throw error;
+      }
+      if (nodeErrorCode(error) === "ENOENT") {
+        return;
       }
       throw hostError("STATE_UNAVAILABLE");
     }
