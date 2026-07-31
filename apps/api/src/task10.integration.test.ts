@@ -231,6 +231,9 @@ describe("Task 10 cross-component local API integration", () => {
       expect(timelineResponse.statusCode).toBe(200);
       expect(timelineResponse.body).not.toContain(SECRET);
       expect(timelineResponse.body).toContain("[REDACTED]");
+      const persistedTimeline = await repository.loadTimeline(created.sessionId, { limit: 500 });
+      expect(persistedTimeline.some((event) => event.summary.includes("[REDACTED]"))).toBe(true);
+      expect(persistedTimeline.every((event) => !event.summary.includes(SECRET))).toBe(true);
       expect(await readStateBytes(stateDirectory)).not.toContain(SECRET);
       expect((await readdir(stateDirectory)).some((name) => name === "profiles.json")).toBe(true);
       expect((await readdir(stateDirectory)).some((name) => name === "sessions.sqlite")).toBe(true);
