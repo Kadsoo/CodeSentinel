@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -32,7 +32,12 @@ async function withStateDirectory(
   try {
     await callback(stateDirectory);
   } finally {
-    await rm(stateDirectory, { recursive: true, force: true });
+    await rm(stateDirectory, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 20,
+    });
   }
 }
 
@@ -142,6 +147,73 @@ describe("profile store", () => {
         expect.arrayContaining([validProfile.id, njuProfile.id]),
       );
       expect(existsSync(join(stateDirectory, "profiles.lock"))).toBe(false);
+    });
+  });
+
+  it("recovers a demonstrably expired lock with a dead owner", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const lockPath = join(stateDirectory, "profiles.lock");
+      await writeFile(
+        lockPath,
+        JSON.stringify({
+          version: 1,
+          owner: "abandoned-owner",
+          processId: 42,
+          acquiredAt: 0,
+        }),
+        "utf8",
+      );
+      const store = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "recovered-lock",
+        now: () => 60_001,
+        isLockOwnerAlive: () => false,
+      });
+
+      await store.upsert(validProfile);
+
+      expect(await store.get(validProfile.id)).toEqual(validProfile);
+      expect(existsSync(lockPath)).toBe(false);
+    });
+  });
+
+  it("recovers an expired legacy empty lock left before ownership metadata was written", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const lockPath = join(stateDirectory, "profiles.lock");
+      await writeFile(lockPath, "", "utf8");
+      await utimes(lockPath, 0, 0);
+      const store = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "recovered-legacy-lock",
+        now: () => 60_001,
+      });
+
+      await store.upsert(validProfile);
+
+      expect(await store.get(validProfile.id)).toEqual(validProfile);
+      expect(existsSync(lockPath)).toBe(false);
+    });
+  });
+
+  it("cleans up its own new lock when lock synchronization fails", async () => {
+    await withStateDirectory(async (stateDirectory) => {
+      const { createProfileStore } = await host();
+      const lockPath = join(stateDirectory, "profiles.lock");
+      const store = createProfileStore({
+        stateDirectory,
+        randomSuffix: () => "lock-sync-failure",
+        testHooks: {
+          beforeLockSync: async () => {
+            throw new Error("simulated lock synchronization failure");
+          },
+        },
+      });
+
+      await expectHostError(() => store.upsert(validProfile), "STATE_UNAVAILABLE");
+      expect(existsSync(lockPath)).toBe(false);
+      expect(existsSync(join(stateDirectory, profilesFileName))).toBe(false);
     });
   });
 
