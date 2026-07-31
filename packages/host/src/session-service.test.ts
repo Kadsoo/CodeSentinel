@@ -5,6 +5,7 @@ import type {
   ResolvePendingPatchInput,
   StopProbe,
 } from "../../core/src/index.js";
+import { CodeSentinelCoreError } from "../../core/src/index.js";
 import type { HarnessEvent, TaskKind } from "../../contracts/src/index.js";
 import type {
   PersistedSession,
@@ -188,6 +189,39 @@ describe("local session service", () => {
     await expect(
       setup.service.resolveApproval({ sessionId: "other", approvalId: "approval-1", decision: "approve" }),
     ).rejects.toMatchObject({ code: "SESSION_NOT_ACTIVE" });
+  });
+
+  it("keeps an awaiting runtime after a stale approval so a later valid approval can proceed", async () => {
+    const resolvePendingPatch = vi
+      .fn()
+      .mockRejectedValueOnce(new CodeSentinelCoreError("APPROVAL_NOT_FOUND"))
+      .mockResolvedValueOnce({
+        session: { ...session("service-session-1"), state: "completed" },
+        events: [],
+      } as unknown as AgentSessionResult);
+    const setup = await serviceWith({
+      runtimeFactory: vi.fn(async () => ({
+        workspaceId: WORKSPACE.workspaceId,
+        profile: { id: "profile-1", kind: "deepseek" as const, endpoint: "https://example.test", model: "fake", credentialRef: "ref" },
+        controller: {
+          runAgentSession: vi.fn(async (input: { session: AgentSession }) => ({
+            session: { ...input.session, state: "awaiting_approval" },
+            events: [],
+          }) as unknown as AgentSessionResult),
+          resolvePendingPatch,
+        },
+      })),
+    });
+    await setup.service.create(validRequest);
+    await expect(
+      setup.service.resolveApproval({ sessionId: "service-session-1", approvalId: "stale", decision: "approve" }),
+    ).rejects.toMatchObject({ code: "APPROVAL_NOT_FOUND" });
+    await setup.service.resolveApproval({
+      sessionId: "service-session-1",
+      approvalId: "valid",
+      decision: "approve",
+    });
+    expect(resolvePendingPatch).toHaveBeenCalledTimes(2);
   });
 
   it("passes bounded read limits through to persistence", async () => {

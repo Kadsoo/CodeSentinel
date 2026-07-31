@@ -203,10 +203,11 @@ export function createSessionService(
     try {
       result = await record!.controller.resolvePendingPatch(request);
     } catch (error) {
-      await finishOperation(record!, undefined);
       if (isCoreApprovalError(error)) {
+        await clearOperation(record!);
         throw hostError("APPROVAL_NOT_FOUND");
       }
+      await finishOperation(record!, undefined);
       throw hostError("STATE_UNAVAILABLE");
     }
     await finishOperation(record!, result);
@@ -305,6 +306,14 @@ export function createSessionService(
         // A failed background runtime must never surface an unhandled rejection.
       }
       state.active = undefined;
+    });
+  }
+
+  async function clearOperation(record: RuntimeRecord): Promise<void> {
+    await runExclusive(async () => {
+      if (state.active === record) {
+        record.operation = undefined;
+      }
     });
   }
 
