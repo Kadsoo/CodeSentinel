@@ -326,7 +326,7 @@ git commit -m "feat: add atomic local provider profiles"
 - Create: packages/host/src/runtime.test.ts
 - Modify: packages/host/src/index.ts
 
-- [ ] **Step 1: Write failing loader and composition tests**
+- [x] **Step 1: Write failing loader and composition tests**
 
 Use isolated fixture directories. Validate a canonical real directory and config, and verify the
 derived workspace ID does not contain the raw workspace path. Reject absent config, symlink root,
@@ -343,13 +343,13 @@ expect(loaded.workspaceId).not.toContain(fixtureRoot);
 expect(loaded.config.verificationCommands.map((command) => command.id)).toEqual(["test"]);
 ~~~
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: npm test -- --run packages/host/src/workspace-config.test.ts packages/host/src/runtime.test.ts
 
 Expected: FAIL because the loader and runtime composition are absent.
 
-- [ ] **Step 3: Implement canonical loading and runtime composition**
+- [x] **Step 3: Implement canonical loading and runtime composition**
 
 Load only canonicalRoot/codesentinel.json with a 64 KiB cap. Reject non-directories and root
 symlinks. Parse CodeSentinelConfigSchema and derive workspace- plus lower-case SHA-256(canonical path).
@@ -364,13 +364,13 @@ Runtime creation must:
 
 Keep ProviderFactory injectable so tests use no transport.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: npm test -- --run packages/host/src/workspace-config.test.ts packages/host/src/runtime.test.ts packages/providers/src/credential-store.test.ts packages/policy/src/guardrail.test.ts packages/core/src/tool-dispatcher.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add packages/host
