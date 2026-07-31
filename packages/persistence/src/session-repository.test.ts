@@ -538,6 +538,45 @@ describe("session event persistence", () => {
     });
   });
 
+  it("keeps legacy timeline reads complete beyond the explicit bounded-read maximum", async () => {
+    await withFileRepository(async (repository, databasePath) => {
+      await repository.createSession(validSession());
+      inspectDatabase(databasePath, (database) => {
+        const insertTimelineEvent = database.prepare(`
+          INSERT INTO timeline_events (
+            session_id,
+            round,
+            kind,
+            summary,
+            occurred_at,
+            session_state
+          ) VALUES (?, 0, 'state', ?, ?, 'running')
+        `);
+        database.transaction(() => {
+          for (let second = 1; second <= 501; second += 1) {
+            insertTimelineEvent.run(SESSION_ID, `state ${second}`, at(second));
+          }
+          database
+            .prepare("UPDATE sessions SET state = 'running', updated_at = ? WHERE id = ?")
+            .run(at(501), SESSION_ID);
+        })();
+      });
+
+      const timeline = await repository.loadTimeline(SESSION_ID);
+      expect(timeline).toHaveLength(501);
+      expect(timeline.map((event) => event.occurredAt)).toEqual(
+        Array.from({ length: 501 }, (_, index) => at(index + 1)),
+      );
+
+      const boundedTimeline = await repository.loadTimeline(SESSION_ID, {
+        limit: 500,
+      });
+      expect(boundedTimeline).toHaveLength(500);
+      expect(boundedTimeline[0]?.occurredAt).toBe(at(2));
+      expect(boundedTimeline.at(-1)?.occurredAt).toBe(at(501));
+    });
+  });
+
   it("rejects every invalid bounded-read limit with the stable input error", async () => {
     const invalidInputs: readonly [string, unknown][] = [
       ["zero", { limit: 0 }],

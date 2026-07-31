@@ -35,7 +35,6 @@ const MAX_DATE_TIMESTAMP = 8_640_000_000_000_000;
 const APPROVAL_EXPIRED_ON_RESTART = "APPROVAL_EXPIRED_ON_RESTART";
 const SESSION_INTERRUPTED = "SESSION_INTERRUPTED";
 const MAX_SESSION_READ_LIMIT = 500;
-const DEFAULT_SESSION_READ_LIMIT = MAX_SESSION_READ_LIMIT;
 
 const EVENT_KEYS = Object.freeze([
   "sessionId",
@@ -3308,11 +3307,12 @@ export function createSessionRepository(databasePath: string): SessionRepository
       assertOpen();
       assertIdentifier(sessionId);
       const limit =
-        input === undefined
-          ? DEFAULT_SESSION_READ_LIMIT
-          : validatedSessionReadLimit(input);
+        input === undefined ? undefined : validatedSessionReadLimit(input);
       try {
-        const rows = selectLimitedTimeline.all(sessionId, limit);
+        const rows =
+          limit === undefined
+            ? selectTimeline.all(sessionId)
+            : selectLimitedTimeline.all(sessionId, limit);
         return Object.freeze(
           rows.map((row) => mapTimelineRow(row, sessionId)),
         );
