@@ -8,6 +8,7 @@
     "@kadsoo/codesentinel-host": "*",
     "@kadsoo/codesentinel-persistence": "*",
     "@kadsoo/codesentinel-providers": "*",
-    "commander": "15.0.0"
+    "commander": "15.0.0",
+    "keytar": "7.9.0"
   }
 }
