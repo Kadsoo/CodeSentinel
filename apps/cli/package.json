@@ -1,0 +1,13 @@
+{
+  "name": "@kadsoo/codesentinel-cli",
+  "private": true,
+  "type": "module",
+  "exports": "./src/main.ts",
+  "dependencies": {
+    "@kadsoo/codesentinel-api": "*",
+    "@kadsoo/codesentinel-host": "*",
+    "@kadsoo/codesentinel-persistence": "*",
+    "@kadsoo/codesentinel-providers": "*",
+    "commander": "15.0.0"
+  }
+}
