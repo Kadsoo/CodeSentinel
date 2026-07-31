@@ -584,19 +584,19 @@ git commit -m "feat: add local credential and server CLI"
 - Modify: AGENT_LOG.md
 - Review: all changes since docs-task10-api-cli-design
 
-- [ ] **Step 1: Write cross-component RED regression tests**
+- [x] **Step 1: Write cross-component RED regression tests**
 
 Use profile, controlled workspace, fake provider and test repository fixtures. Start through HTTP,
 observe a redacted SQLite timeline, reject concurrent creation, issue stop, and scan profiles.json,
 SQLite, journal, WAL, SHM, HTTP response and captured CLI output for a secret sentinel.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: npm test -- --run packages/host/src/session-service.test.ts apps/api/src/routes.test.ts apps/cli/src/main.test.ts
 
 Expected: at least the new integration assertion fails before its minimal fix.
 
-- [ ] **Step 3: Implement only the demonstrated fix and run focused GREEN**
+- [x] **Step 3: Implement only the demonstrated fix and run focused GREEN**
 
 Do not introduce a real Provider call, user workspace path, unbounded read, direct patch write,
 plaintext credential fallback or network test.
@@ -605,14 +605,14 @@ Run: npm test -- --run packages/host/src apps/api/src apps/cli/src packages/core
 
 Expected: PASS.
 
-- [ ] **Step 4: Review final diff against requirements**
+- [x] **Step 4: Review final diff against requirements**
 
 Inspect SPEC.md sections 4.1 through 4.3, 5, 7 through 9 and the Task 10 design. Check strict inputs,
 atomic profiles, credential non-leakage, endpoint validation, one active session, stopping, bounded
 reads, recovery, loopback binding and test process cleanup. Every Critical or Important finding needs
 a new RED test before its minimal fix.
 
-- [ ] **Step 5: Run final verification**
+- [x] **Step 5: Run final verification**
 
 ~~~powershell
 npm test
@@ -626,7 +626,7 @@ git status --short --branch
 Expected: all tests pass apart from explicitly documented skips; all commands exit 0; no test-started
 server remains; the worktree is clean before evidence edits.
 
-- [ ] **Step 6: Record factual completion evidence**
+- [x] **Step 6: Record factual completion evidence**
 
 Update the Task 10 PLAN block and append a dated AGENT_LOG entry using actual commit IDs, RED/GREEN
 counts, final verification output, review outcomes, process cleanup and remote state.
