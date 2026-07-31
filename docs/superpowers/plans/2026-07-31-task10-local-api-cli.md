@@ -30,11 +30,14 @@
 **Files:**
 - Modify: packages/contracts/src/config.ts
 - Modify: packages/contracts/src/config.test.ts
+- Modify: packages/contracts/src/action.test.ts
+- Modify: packages/policy/src/command-policy.ts
+- Create: packages/policy/src/command-policy.test.ts
 - Modify: packages/policy/src/guardrail.test.ts
 
-- [ ] **Step 1: Write failing schema tests**
+- [x] **Step 1: Write failing schema tests**
 
-Add a complete configuration fixture and reject missing profile, empty allowlist, parent traversal and unknown keys.
+Add a complete configuration fixture and reject missing profile, empty allowlist, parent traversal and unknown keys. Add a command-policy regression proving that a valid verification-command array is accepted without fabricated workspace fields, while an unknown command field remains rejected.
 
 ~~~ts
 const completeConfig = {
@@ -61,13 +64,13 @@ it.each([
 });
 ~~~
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: npm test -- --run packages/contracts/src/config.test.ts
 
 Expected: FAIL because the current strict schema only accepts verificationCommands.
 
-- [ ] **Step 3: Add strict fields without loosening command validation**
+- [x] **Step 3: Add strict fields without loosening command validation**
 
 ~~~ts
 const SafePathPatternSchema = z
@@ -87,15 +90,16 @@ export const CodeSentinelConfigSchema = z
 ~~~
 
 Keep VerificationCommandSchema unchanged. Update existing policy fixtures to use the complete
-configuration.
+configuration. In command-policy, validate only the existing strict verification-command array
+schema; do not create profile/path defaults merely to validate a command.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: npm test -- --run packages/contracts/src/config.test.ts packages/policy/src/guardrail.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ~~~bash
 git add packages/contracts/src/config.ts packages/contracts/src/config.test.ts packages/policy
