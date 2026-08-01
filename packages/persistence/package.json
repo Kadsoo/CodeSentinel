@@ -1,0 +1,9 @@
+{
+  "name": "@kadsoo/codesentinel-persistence",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "better-sqlite3": "13.0.1"
+  }
+}

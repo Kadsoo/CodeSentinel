@@ -5,6 +5,8 @@ const NonEmptyString = z.string().refine((value) => value.trim().length > 0, {
 });
 export const IdentifierSchema = z.string().trim().min(1);
 const Sha256Hash = z.string().regex(/^[0-9a-fA-F]{64}$/);
+export const PatchStageSchema = z.enum(["repair", "test", "implementation"]);
+export type PatchStage = z.infer<typeof PatchStageSchema>;
 const VerificationCommandIdSchema = z
   .string()
   .refine((value) => !hasControlCharacter(value))
@@ -14,7 +16,7 @@ const ListFilesActionSchema = z
   .object({
     kind: z.literal("list_files"),
     path: NonEmptyString.optional(),
-    depth: z.number().int().positive().optional(),
+    depth: z.number().int().positive().max(8).optional(),
   })
   .strict();
 
@@ -30,7 +32,7 @@ const SearchTextActionSchema = z
     kind: z.literal("search_text"),
     query: NonEmptyString,
     path: NonEmptyString.optional(),
-    maxResults: z.number().int().positive().optional(),
+    maxResults: z.number().int().positive().max(100).optional(),
   })
   .strict();
 
@@ -41,6 +43,7 @@ const ProposePatchActionSchema = z
     baseHash: Sha256Hash,
     patch: z.string().min(1),
     reason: NonEmptyString,
+    stage: PatchStageSchema,
   })
   .strict();
 

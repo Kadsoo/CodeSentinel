@@ -17,7 +17,7 @@ import {
 
 const UNBOUND_APPROVAL_ID = "unbound-approval";
 const UNBOUND_ACTION_ID = "unbound-action";
-const MAX_PATCH_BYTES = 1_048_576;
+export const MAX_PATCH_BYTES = 1_048_576;
 const MAX_PATCH_RESULT_BYTES = MAX_PATCH_BYTES * 2;
 const NO_NEWLINE_MARKER = "\\ No newline at end of file";
 

@@ -9,6 +9,19 @@ const VerificationIdSchema = z
   .max(128)
   .refine((value) => !hasControlCharacter(value))
   .pipe(IdentifierSchema);
+const ProviderProfileIdSchema = z
+  .string()
+  .max(128)
+  .refine((value) => !hasControlCharacter(value))
+  .pipe(IdentifierSchema);
+const PathPatternSchema = z
+  .string()
+  .max(256)
+  .refine((value) => value.trim().length > 0)
+  .refine((value) => !hasControlCharacter(value))
+  .refine((value) => !value.includes(".."));
+const AllowedPathsSchema = z.array(PathPatternSchema).min(1).max(64);
+const SensitivePatternsSchema = z.array(PathPatternSchema).max(64);
 const NpmScriptSchema = z.enum(["check", "lint", "test", "typecheck", "verify"]);
 const NpmArgumentsSchema = z.union([
   z.tuple([z.literal("test")]),
@@ -58,6 +71,9 @@ const VerificationCommandsSchema = z
 
 export const CodeSentinelConfigSchema = z
   .object({
+    providerProfileId: ProviderProfileIdSchema,
+    allowedPaths: AllowedPathsSchema,
+    sensitivePatterns: SensitivePatternsSchema.optional(),
     verificationCommands: VerificationCommandsSchema,
   })
   .strict();

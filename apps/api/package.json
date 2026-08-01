@@ -1,0 +1,11 @@
+{
+  "name": "@kadsoo/codesentinel-api",
+  "private": true,
+  "type": "module",
+  "exports": "./src/server.ts",
+  "dependencies": {
+    "@kadsoo/codesentinel-host": "*",
+    "fastify": "5.10.0",
+    "zod": "4.4.3"
+  }
+}

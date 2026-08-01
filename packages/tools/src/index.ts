@@ -1,4 +1,4 @@
-export { applyApprovedPatch } from "./patch.js";
+export { applyApprovedPatch, MAX_PATCH_BYTES } from "./patch.js";
 export type {
   ApplyApprovedPatchInput,
   ApplyApprovedPatchResult,
@@ -10,10 +10,23 @@ export type {
   VerificationResult,
   VerificationStatus,
 } from "./verification.js";
-export { CodeSentinelToolError, readWorkspaceFile } from "./workspace.js";
+export {
+  CodeSentinelToolError,
+  getWorkspaceFileHash,
+  listWorkspaceFiles,
+  readWorkspaceFile,
+  searchWorkspaceText,
+} from "./workspace.js";
 export type {
+  ListWorkspaceFilesInput,
+  ListWorkspaceFilesResult,
   ReadWorkspaceFileInput,
   ReadWorkspaceFileResult,
+  SearchTextMatch,
+  SearchWorkspaceTextInput,
+  SearchWorkspaceTextResult,
   ToolErrorCode,
   WorkspaceFileInput,
+  WorkspaceListEntry,
+  WorkspacePathFilter,
 } from "./workspace.js";

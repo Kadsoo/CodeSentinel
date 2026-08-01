@@ -15,6 +15,7 @@ const trustedCommand: VerificationCommand = {
 const context = {
   workspaceRoot: "C:/repo",
   config: {
+    providerProfileId: "deepseek-default",
     allowedPaths: ["src/**"],
     verificationCommands: [],
   },
@@ -43,6 +44,7 @@ describe("evaluateAction", () => {
         baseHash,
         patch: "@@ -1 +1 @@\n-export const add = () => 0;\n+export const add = () => 2;",
         reason: "Fix incorrect addition",
+        stage: "repair",
       },
       context,
     );
