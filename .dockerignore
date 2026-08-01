@@ -1,0 +1,17 @@
+.git
+.gitignore
+.worktrees
+node_modules
+**/node_modules
+**/dist
+**/.vite-temp
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+coverage
+.vscode
+

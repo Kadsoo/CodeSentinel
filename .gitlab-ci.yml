@@ -1,0 +1,20 @@
+image: node:22.17.0-bookworm
+
+stages:
+  - test
+  - verify
+
+unit-test:
+  stage: test
+  script:
+    - npm ci --ignore-scripts --no-audit --no-fund
+    - npm test
+
+static-checks:
+  stage: verify
+  script:
+    - npm ci --ignore-scripts --no-audit --no-fund
+    - npm run demo:mechanisms
+    - npm run typecheck
+    - npm run lint
+    - npm run web:build
