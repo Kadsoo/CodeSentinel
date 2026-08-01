@@ -123,7 +123,7 @@ docs/superpowers     设计与实现计划
 
 ## CI 与验证记录
 
-GitHub Actions 的 `unit-test` job 在 push/PR 上运行 `npm ci`、`npm test`、机制演示、typecheck、lint 和 WebUI build。`.gitlab-ci.yml` 同样提供课程要求的 `unit-test` job。提交作业前，请在目标 NJU Git 仓库或镜像仓库中确认最后一次 CI/CD 记录为 pass，并将记录链接写入提交说明。
+GitHub Actions 的 `unit-test` job 在 push/PR 上运行 `npm ci`、`npm test`、机制演示、typecheck、lint、WebUI build 和静态 Docker 镜像构建。`.gitlab-ci.yml` 同样提供课程要求的 `unit-test` job。提交作业前，请在目标 NJU Git 仓库或镜像仓库中确认最后一次 CI/CD 记录为 pass，并将记录链接写入提交说明。
 
 ## 已知限制
 

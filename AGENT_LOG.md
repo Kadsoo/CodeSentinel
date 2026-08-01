@@ -165,3 +165,4 @@
 - 分发边界：已修正 Dockerfile 中不存在的根级 Vite 配置引用。`docker build` 未能执行，因为本机 Docker Desktop Linux daemon 未启动（`dockerDesktopLinuxEngine` pipe 不存在）；未启动或停止任何本任务长驻进程。
 - 线上状态：GitHub Actions CI 与 Pages 尚未以本分支实际运行，故没有虚构 pass 记录或 Pages URL；合并并成功发布后再把真实 URL 写入 README 和提交材料。
 - 远程同步尝试：匿名 `git ls-remote` 可读取 `main`；本地 `git push` 因 `gh` 未登录且 HTTPS 无交互终端失败；已授权 GitHub connector 读取仓库但创建 ref 返回 API 403。没有修改远程 `main`，没有创建空 PR，也没有发送任何凭据。
+- 条款补齐：课程要求容器分发时 CI 构建镜像；已在 `.github/workflows/ci.yml` 的 `unit-test` job 增加 `docker build --pull=false --tag codesentinel-mock-demo:ci .`，并同步 README 说明。当前本机 Docker daemon 未启动，因此该步骤待远程 Actions 实际执行确认。
