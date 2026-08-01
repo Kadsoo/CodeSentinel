@@ -10,8 +10,8 @@ permissions:
 jobs:
   unit-test:
     name: unit-test
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,5 +32,13 @@ jobs:
         run: npm run lint
       - name: Build WebUI
         run: npm run web:build
+
+  container-build:
+    name: container-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Build static demo image
         run: docker build --pull=false --tag codesentinel-mock-demo:ci .
