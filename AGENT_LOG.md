@@ -146,3 +146,11 @@
 - 审计结果：代码、`SPEC.md`、`PLAN.md`、`SPEC_PROCESS.md` 与 `AGENT_LOG.md` 已存在；根目录缺少 README、REFLECTION、`.gitlab-ci.yml`、GitHub Actions、分发配置和公开 WebUI 演示入口。
 - 计划：在隔离分支 `feat/submission-materials` 补齐材料，增加无凭据、无网络的 React Mock WebUI 和机制演示；真实 Provider、真实 Key、本地工作区和任意远程执行不进入公开演示。
 - 人工责任：`REFLECTION.md` 仅提供学生可编辑初稿，提交前必须由学生本人核对、重写并标注 AI 辅助润色；线上 URL 只有在 Pages 工作流实际发布后才记录。
+
+## 2026-08-01 — SUBMISSION-MATERIALS：WebUI、演示与交付文件
+
+- TDD：先新增 `apps/web/src/App.test.tsx`，确认缺失 `App` 时 RED；实现无凭据 React Mock UI 后 focused test 为 1/1，Vite build 成功。
+- 机制演示：先新增 `tests/mechanism-demo.test.ts`，确认脚本缺失时 RED；`scripts/mechanism-demo.ts` 现在输出护栏拒绝、失败反馈和审批基线绑定三条离线证据。
+- 交付配置：新增 GitHub Actions、课程要求的 `.gitlab-ci.yml`（含 `unit-test`）、GitHub Pages 静态发布工作流、静态演示 Dockerfile 与 `.dockerignore`。
+- 文档：新增 `README.md` 和 `REFLECTION.md` 初稿；README 明确区分本地 API 与公开 Mock 演示；反思必须由学生本人重写后提交。
+- 实现提交：WebUI `30a383c`；机制演示 `26134cf`；CI/Pages/容器 `eb25700`；材料计划 `b004ee0`。

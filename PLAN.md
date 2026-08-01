@@ -783,6 +783,14 @@ git add README.md SECURITY.md .github/workflows/ci.yml .gitlab-ci.yml apps/demo 
 git commit -m "chore: add distribution and CI delivery artifacts"
 ~~~
 
+### Submission material follow-up: 2026-08-01
+
+- [x] Add deterministic React Mock WebUI and focused UI test — commit `30a383c`.
+- [x] Add offline mechanism demonstration and regression test — commit `26134cf`.
+- [x] Add GitHub Actions, `.gitlab-ci.yml` `unit-test`, Pages workflow, and static container recipe — commit `eb25700`.
+- [x] Add README and student-editable `REFLECTION.md` draft — pending final material commit.
+- [ ] Record a real passing CI/CD run and the published Pages URL before submission.
+
 ## Cold-start validation protocol
 
 Before any production implementation task is merged, start a brand-new session using a different Agent type. Give it only the absolute paths to SPEC.md and PLAN.md; do not provide this conversation, AGENT_LOG.md, repository history, verbal clarifications or additional requirements. Ask it to attempt Tasks 1 and 2 in a disposable verification worktree and to stop immediately whenever the documents leave an implementation decision ambiguous.
