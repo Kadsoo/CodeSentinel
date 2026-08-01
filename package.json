@@ -16,6 +16,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
+    "web:dev": "npm --workspace @kadsoo/codesentinel-web run dev",
+    "web:build": "npm --workspace @kadsoo/codesentinel-web run build",
     "demo": "tsx scripts/mechanism-demo.ts"
   },
   "dependencies": {
