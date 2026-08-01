@@ -166,7 +166,10 @@ function startExternalLockHolder(lockDatabasePath: string): ExternalUpsert {
     "database.pragma('journal_mode = DELETE');",
     "database.exec('BEGIN IMMEDIATE');",
     "process.stdout.write('started\\n');",
-    "setTimeout(() => { database.exec('COMMIT'); database.close(); process.stdout.write('completed\\n'); }, 1500);",
+    // Keep the lock longer than the SQLite busy timeout even when the parent
+    // worker is under load; the test is about fail-closed recovery, not a
+    // scheduler race between two wall-clock timers.
+    "setTimeout(() => { database.exec('COMMIT'); database.close(); process.stdout.write('completed\\n'); }, 4000);",
   ].join("\n");
   return startExternalProcess(helper, [lockDatabasePath]);
 }

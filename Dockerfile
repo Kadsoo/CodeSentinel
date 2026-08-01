@@ -1,7 +1,7 @@
 FROM node:22.17.0-alpine AS build
 
 WORKDIR /app
-COPY package.json package-lock.json tsconfig.json vite.config.ts eslint.config.mjs ./
+COPY package.json package-lock.json tsconfig.json eslint.config.mjs ./
 COPY apps ./apps
 COPY packages ./packages
 COPY scripts ./scripts
