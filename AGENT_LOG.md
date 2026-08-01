@@ -179,3 +179,9 @@
 - 根因：runner 继承的 `TEMP`/`TMP` 别名使测试 fixture 路径与规范路径不一致，依赖 fixture 字符串的竞态模拟因此没有触发。
 - 修正：在 Windows job 开始阶段将 `TEMP` 和 `TMP` 统一为 `USERPROFILE\AppData\Local\Temp` 的长路径；不修改路径校验实现或安全契约。
 - 验证：重新运行 Windows unit-test，确认 1,011 个 Vitest 用例、typecheck、lint 和 WebUI build 全部通过。
+
+## 2026-08-01 — CI-006：启用 Pages 并完成公开发布
+
+- 触发：PR #4 合并后的 Pages 构建和 artifact 上传成功，但 deploy job 因仓库尚未启用 Pages 返回 404。
+- 修正：将仓库 Pages source 设置为 GitHub Actions，并重跑发布 workflow。
+- 验证：Publish Mock WebUI 的 build/deploy 两个 job 均成功；公开 URL 为 `https://kadsoo.github.io/CodeSentinel/`。页面只发布无凭据 Mock WebUI，不连接 Provider、不读取本地工作区。

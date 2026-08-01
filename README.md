@@ -6,7 +6,7 @@ CodeSentinel 是一个面向程序员的、本地优先的 Coding Agent Harness�
 
 本仓库对应 AI4SE Final Project A：Coding Agent Harness。`SPEC.md`、`PLAN.md`、`SPEC_PROCESS.md` 和 `AGENT_LOG.md` 记录设计、计划、冷启动验证与实现过程；每个功能批次保留独立 commit/PR 历史。
 
-公开 Mock WebUI 会由 GitHub Pages 工作流发布。首次 Pages 工作流成功后，将实际 URL 写入本节；在此之前不要把预期地址当作已部署地址。
+公开 Mock WebUI 已由 GitHub Pages 工作流发布：[https://kadsoo.github.io/CodeSentinel/](https://kadsoo.github.io/CodeSentinel/)。页面只展示无凭据 Mock 机制证据。
 
 ## 为什么值得使用
 
@@ -94,7 +94,7 @@ docker run --rm -p 8080:80 codesentinel-mock-demo
 
 ### GitHub Pages
 
-`.github/workflows/pages.yml` 会在 `main` push 后构建 `apps/web/dist` 并发布到 GitHub Pages。首次使用需要仓库管理员在 Settings → Pages 中将 Source 设为 GitHub Actions；只有 workflow 成功后才能把 Actions 输出的 `page_url` 作为课程提交 URL。
+`.github/workflows/pages.yml` 会在 `main` push 后构建 `apps/web/dist` 并发布到 GitHub Pages。仓库 Pages Source 已设为 GitHub Actions，最近一次发布成功；课程提交 URL 为 [https://kadsoo.github.io/CodeSentinel/](https://kadsoo.github.io/CodeSentinel/)。
 
 ## 目录结构
 
