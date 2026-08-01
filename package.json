@@ -16,7 +16,10 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "demo": "tsx scripts/mechanism-demo.ts"
+    "web:dev": "npm --workspace @kadsoo/codesentinel-web run dev",
+    "web:build": "npm --workspace @kadsoo/codesentinel-web run build",
+    "demo": "tsx scripts/mechanism-demo.ts",
+    "demo:mechanisms": "tsx scripts/mechanism-demo.ts"
   },
   "dependencies": {
     "better-sqlite3": "13.0.1",

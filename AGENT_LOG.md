@@ -139,3 +139,43 @@
 - 最终检查：focused redaction/repository/error 为 418/418；六个 Task 9 persistence 测试文件为 491/491；全量 `npm test` 为 26 files、907 passed、6 skipped；`npm run typecheck`、`npm run lint`、`npm run build` 和 `git diff --check` 均 exit 0。
 - 独立复核：最终规格/质量和安全/错误契约两次复核均为 Ready，Critical/Important/Minor 均为 0；复验原始及 escaped token 尾部、注释分隔 Bearer、SQLite 全部旁文件字节，以及运行时错误码不可变性。
 - 本地提交：`7f9cc43` 至 `36fa320` 的 Task 9 提交均只在本地分支；未调用真实 Provider、network 或 credentials，未推送、创建 PR 或合并。
+
+## 2026-08-01 — SUBMISSION-MATERIALS：课程交付清单审计
+
+- 资料依据：`作业要求/通用要求.md` §4.7–§5 与 `AI4SE_Final_Project_A_Coding_Agent_Harness.md` §A.6–§A.7。
+- 审计结果：代码、`SPEC.md`、`PLAN.md`、`SPEC_PROCESS.md` 与 `AGENT_LOG.md` 已存在；根目录缺少 README、REFLECTION、`.gitlab-ci.yml`、GitHub Actions、分发配置和公开 WebUI 演示入口。
+- 计划：在隔离分支 `feat/submission-materials` 补齐材料，增加无凭据、无网络的 React Mock WebUI 和机制演示；真实 Provider、真实 Key、本地工作区和任意远程执行不进入公开演示。
+- 人工责任：`REFLECTION.md` 仅提供学生可编辑初稿，提交前必须由学生本人核对、重写并标注 AI 辅助润色；线上 URL 只有在 Pages 工作流实际发布后才记录。
+
+## 2026-08-01 — SUBMISSION-MATERIALS：WebUI、演示与交付文件
+
+- TDD：先新增 `apps/web/src/App.test.tsx`，确认缺失 `App` 时 RED；实现无凭据 React Mock UI 后 focused test 为 1/1，Vite build 成功。
+- 机制演示：先新增 `tests/mechanism-demo.test.ts`，确认脚本缺失时 RED；`scripts/mechanism-demo.ts` 现在输出护栏拒绝、失败反馈和审批基线绑定三条离线证据。
+- 交付配置：新增 GitHub Actions、课程要求的 `.gitlab-ci.yml`（含 `unit-test`）、GitHub Pages 静态发布工作流、静态演示 Dockerfile 与 `.dockerignore`。
+- 文档：新增 `README.md` 和 `REFLECTION.md` 初稿；README 明确区分本地 API 与公开 Mock 演示；反思必须由学生本人重写后提交。
+- 实现提交：WebUI `30a383c`；机制演示 `26134cf`；CI/Pages/容器 `eb25700`；材料计划 `b004ee0`。
+
+## 2026-08-01 — SUBMISSION-MATERIALS：本地最终验证与稳定性修正
+
+- 稳定性修正（提交 `93e93f8`、`4df599d`）：Vitest 设置 4 个 worker、15 秒测试/钩子超时；脱敏 65 KiB 墙钟压力用例使用与相邻用例一致的 500ms 环境容差；SQLite 外部锁测试将持锁时间从 1.5 秒延长到 4 秒，避免共享 runner 调度竞态。输出、安全断言和失败关闭语义未改变。
+- 干净安装：`npm ci --ignore-scripts --no-audit --no-fund` 成功安装 300 个包；仅有已存在的 `whatwg-encoding` 弃用警告。
+- 本地验证：`npm test` 为 38 个文件、1005 passed、6 skipped；`npm run typecheck`、`npm run build`、`npm run lint`、`npm run web:build` 和 `npm run demo:mechanisms` 均通过；机制演示输出 deny/feedback/approval 三条稳定证据。
+- 材料检查：所需 `SPEC.md`、`PLAN.md`、`SPEC_PROCESS.md`、`AGENT_LOG.md`、`README.md`、`REFLECTION.md`、`.gitlab-ci.yml`、GitHub Actions、Dockerfile 均存在；反思初稿 2361 字符，提交前仍由学生本人核对、重写并标注 AI 辅助范围。
+- 安全扫描：无受跟踪 `.env` 文件；私钥、长 `ghp_`/`sk-` 模式命中 0；演示不读取真实凭据、不连接 Provider、不运行工作区代码。
+- 分发边界：已修正 Dockerfile 中不存在的根级 Vite 配置引用。`docker build` 未能执行，因为本机 Docker Desktop Linux daemon 未启动（`dockerDesktopLinuxEngine` pipe 不存在）；未启动或停止任何本任务长驻进程。
+- 线上状态：GitHub Actions CI 与 Pages 尚未以本分支实际运行，故没有虚构 pass 记录或 Pages URL；合并并成功发布后再把真实 URL 写入 README 和提交材料。
+- 远程同步尝试：匿名 `git ls-remote` 可读取 `main`；本地 `git push` 因 `gh` 未登录且 HTTPS 无交互终端失败；已授权 GitHub connector 读取仓库但创建 ref 返回 API 403。没有修改远程 `main`，没有创建空 PR，也没有发送任何凭据。
+- 条款补齐：课程要求容器分发时 CI 构建镜像；已在 `.github/workflows/ci.yml` 的 `unit-test` job 增加 `docker build --pull=false --tag codesentinel-mock-demo:ci .`，并同步 README 说明。当前本机 Docker daemon 未启动，因此该步骤待远程 Actions 实际执行确认。
+
+## 2026-08-01 — CI-004：按目标平台修正 GitHub Actions runner
+
+- 触发：PR #4 的 Ubuntu `unit-test` 中 `packages/tools/src/verification.test.ts` 有 72 项失败，统一返回 `spawn_failed / VERIFICATION_LAUNCHER_UNAVAILABLE`；其余测试通过。
+- 根因：项目目标为 Windows x64，受控 runner 和测试按 Windows Node 布局解析 npm CLI；Ubuntu toolcache 使用 `lib/node_modules/npm` 布局，未满足当前安全解析契约。
+- 修正：经批准后将完整 `unit-test` job 改为 `windows-latest`；把 Docker 镜像构建拆为独立 Ubuntu `container-build` job，避免改变受控 launcher 的安全规则。
+
+## 2026-08-01 — CI-005：规范 Windows 临时目录的规范路径
+
+- 触发：新的 Windows PR 运行中 `verification.test.ts` 已全部通过，但 7 个 workspace 路径安全断言失败；失败日志显示 fixture 使用 `C:\Users\RUNNER~1\...` 短路径，而 `realpath()` 返回 `C:\Users\runneradmin\...` 长路径。
+- 根因：runner 继承的 `TEMP`/`TMP` 别名使测试 fixture 路径与规范路径不一致，依赖 fixture 字符串的竞态模拟因此没有触发。
+- 修正：在 Windows job 开始阶段将 `TEMP` 和 `TMP` 统一为 `USERPROFILE\AppData\Local\Temp` 的长路径；不修改路径校验实现或安全契约。
+- 验证：重新运行 Windows unit-test，确认 1,011 个 Vitest 用例、typecheck、lint 和 WebUI build 全部通过。

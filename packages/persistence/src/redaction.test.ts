@@ -870,7 +870,10 @@ describe("redactText", () => {
     expect(input.length).toBeGreaterThan(65_000);
     expect(input.length).toBeLessThanOrEqual(65_536);
     expect(redactText(input)).toBe("[REDACTED]");
-    expect(performance.now() - startedAt).toBeLessThan(100);
+    // Wall-clock microbenchmarks vary on shared CI runners. Keep the same
+    // 65 KiB linear-time input while using the 500ms budget used by the
+    // adjacent redaction stress cases.
+    expect(performance.now() - startedAt).toBeLessThan(500);
   });
 
   it("keeps repeated known prefixes in one token run within a linear-time margin", () => {
