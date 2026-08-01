@@ -511,142 +511,31 @@ git add packages/providers
 git commit -m "feat: add provider and credential abstractions"
 ~~~
 
-### Task 8: Implement the self-authored Agent Loop and feedback stops
+### Task 8: [x] Completed 2026-07-30 — Implement the self-authored Agent Loop and feedback stops
 
-**Dependencies:** Tasks 4, 5, 6 and 7.
+- **Delivered scope:** the Core workspace provides the self-authored loop: initial test-repair verification, including the NOT_REPRODUCIBLE stop; on every round, one schema-validated Action passes through BoundPolicy and the dispatcher; Provider decisions are capped at three and receive redacted feedback. Safe, bounded workspace browsing and event emission are included.
+- **Approval and feature controls:** patch approval resumes privately and only once, using SHA-256 patch/base hashes, TTL enforcement, an atomic claim, and event-before-write ordering. Feature sessions enforce test → RED → implementation → GREEN phase gates.
+- **Verification-command binding:** every Provider-selected verification command is strictly bound to the session. A repair or feature mismatch is POLICY_DENIED; selecting the feature command at an invalid feature stage is FEATURE_STAGE_INVALID.
+- **Test boundary:** all coverage uses deterministic tests without network access, real Provider calls, or real credentials.
+- **Implementation commits:** 559a899, c036664, ad74f7e, dab1d0a, 6cd0898, 0e47fd7, bb159d1.
+- **Final verification (all green before completion):** npm test — 19 files, 382 passed, 6 skipped; npm run typecheck — exit 0; npm run lint — exit 0; git diff --check docs-task8-agent-loop-design...HEAD — exit 0.
 
-**Files:**
-- Create: packages/core/package.json
-- Create: packages/core/src/agent-loop.ts
-- Create: packages/core/src/context.ts
-- Create: packages/core/src/in-memory-event-sink.ts
-- Create: packages/core/src/tool-dispatcher.ts
-- Create: packages/core/src/agent-loop.test.ts
-- Create: packages/core/src/index.ts
+### Task 9: [x] Completed 2026-07-31 — Persist structured redacted session history
 
-- [ ] **Step 1: Write failing loop tests**
+**Dependencies:** Tasks 2 and 8.
 
-~~~ts
-import { describe, expect, it, vi } from "vitest";
-import { ScriptedMockProvider } from "@kadsoo/codesentinel-providers";
-import { InMemoryEventSink } from "./in-memory-event-sink.js";
-import { createToolDispatcher } from "./tool-dispatcher.js";
-import { runAgentSession } from "./agent-loop.js";
+**Authoritative documents:**
 
-const failedVerification = { commandId: "test", exitCode: 1, timedOut: false, durationMs: 4, summary: "expected 2, received 1" };
+- Design: `docs/superpowers/specs/2026-07-30-task9-redacted-persistence-design.md`
+- Implementation plan: `docs/superpowers/plans/2026-07-30-task9-redacted-persistence.md`
 
-it("feeds a failed verification result into the next provider request", async () => {
-  const provider = new ScriptedMockProvider([
-    { kind: "run_verification", commandId: "test" },
-    { kind: "finish", outcome: "needs_human", summary: "inspect failure" },
-  ]);
-  const trace = await runAgentSession({
-    session: { id: "s1", taskKind: "test_repair", state: "created", round: 0, workspaceId: "w1", providerId: "p1" },
-    provider,
-    policy: { evaluate: () => ({ decision: "allow", reason: "ALLOWED" }) },
-    tools: createToolDispatcher({ runVerification: vi.fn().mockResolvedValue(failedVerification) }),
-    eventSink: new InMemoryEventSink(),
-  });
-  expect(trace.providerRequests[1].messages.at(-1)?.content).toContain("expected 2");
-});
+**Delivered scope:** Extend the Harness event contract with non-secret structured facts, make Core emit stable action/Policy/tool/verification/state/approval metadata, and add a hardened `better-sqlite3` repository for sessions, ordered timeline events, action records, approval metadata, verification runs and bounded session memory. Every public text path is redacted before persistence; clear is session-scoped and uses secure delete; explicit restart recovery stops nonterminal sessions and expires pending approvals without persisting or restoring raw patches.
 
-it("stops after three unsuccessful repair rounds", async () => {
-  const provider = new ScriptedMockProvider([
-    { kind: "run_verification", commandId: "test" },
-    { kind: "run_verification", commandId: "test" },
-    { kind: "run_verification", commandId: "test" },
-  ]);
-  const trace = await runAgentSession({
-    session: { id: "s2", taskKind: "test_repair", state: "created", round: 0, workspaceId: "w2", providerId: "p2" },
-    provider,
-    policy: { evaluate: () => ({ decision: "allow", reason: "ALLOWED" }) },
-    tools: createToolDispatcher({ runVerification: vi.fn().mockResolvedValue(failedVerification) }),
-    eventSink: new InMemoryEventSink(),
-  });
-  expect(trace.session.state).toBe("failed");
-  expect(trace.session.round).toBe(3);
-});
-~~~
+**TDD and security hardening:** Explicit RED cases covered structured assignments, escaped key/value fragments, quote/comment/URL boundary ambiguity, Bearer-token boundaries, bounded truncation/idempotence, SQLite physical bytes, and immutable persistence error codes. Representative RED observations before the minimal fixes were 3 known-prefix escape-tail failures, 8 comment-separated Bearer failures, and 1 error-contract failure. Valid syntax preserves adjacent safe text; ambiguous syntax or a sensitive candidate that cannot be safely segmented becomes the whole `[REDACTED]` input.
 
-- [ ] **Step 2: Run loop tests to record red**
+**Local implementation commits:** `7f9cc43`, `122d2ab`, `dafbbbf`, `570968e`, `f7b4ec6`, `0934bef`, `5d39847`, `07e8334`, `e90aa65`, `a0b7104`, `1efabeb`, `c2b6a6e`, `8d57af3`, `159ab61`, `cc71a05`, `a89821c`, `2812272`, `044fd48`, `9636dae`, `a939f9f`, `237ecd1`, `7a6ca3b`, `36fa320`.
 
-Run: npm test -- --run packages/core/src/agent-loop.test.ts
-Expected: FAIL because runAgentSession is missing.
-
-- [ ] **Step 3: Implement the loop without framework agent runners**
-
-Create runAgentSession with explicit session, provider, policy, tools and EventSink dependencies. Define ToolDispatcher with a method per Action and createToolDispatcher(overrides) to supply deterministic unsupported-tool errors for omitted methods in tests. It assembles sanitized context, calls the injected Provider once per step, validates one returned Action with ActionSchema, evaluates it with Policy Guardrail, dispatches it through injected tools, appends an event through EventSink and feeds a structured result into the next request. Enter awaiting_approval for a patch proposal; do not apply it until the separate approval route resumes the session. Stop on pass, non-reproducible initial test, user rejection, deny decision, unrecoverable tool error or round three. InMemoryEventSink exists only for core tests; Task 9 supplies the SQLite implementation.
-
-- [ ] **Step 4: Verify feedback and stopping**
-
-Run: npm test -- --run packages/core/src/agent-loop.test.ts
-Expected: PASS with no network calls.
-Run: npm test
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-Run:
-
-~~~bash
-git add packages/core
-git commit -m "feat: add bounded feedback-driven agent loop"
-~~~
-
-### Task 9: Persist sessions and redact stored output
-
-**Dependencies:** Task 2.
-
-**Files:**
-- Create: packages/persistence/package.json
-- Create: packages/persistence/src/redaction.ts
-- Create: packages/persistence/src/session-repository.ts
-- Create: packages/persistence/src/redaction.test.ts
-- Create: packages/persistence/src/session-repository.test.ts
-- Create: packages/persistence/src/index.ts
-
-- [ ] **Step 1: Write failing redaction and repository tests**
-
-~~~ts
-import { expect, it } from "vitest";
-import { redactText } from "./redaction.js";
-import { createSessionRepository } from "./session-repository.js";
-
-it("redacts an API-key-like value before persistence", () => {
-  expect(redactText("Authorization: Bearer sk-1234567890abcdef")).not.toContain("sk-1234567890abcdef");
-});
-
-it("clears every persisted record for one session", async () => {
-  const repository = createSessionRepository(":memory:");
-  await repository.createSession({ id: "s1", taskKind: "test_repair", state: "created", round: 0, workspaceId: "w1", providerId: "p1" });
-  await repository.appendAction({ sessionId: "s1", kind: "finish", inputSummary: "done", policyDecision: "allow", resultSummary: "done" });
-  await repository.clearSession("s1");
-  await expect(repository.loadTimeline("s1")).resolves.toEqual([]);
-});
-~~~
-
-- [ ] **Step 2: Run persistence tests to record red**
-
-Run: npm test -- --run packages/persistence/src/redaction.test.ts packages/persistence/src/session-repository.test.ts
-Expected: FAIL because redaction and repository modules are missing.
-
-- [ ] **Step 3: Implement local-only persistence**
-
-Create SQLite tables for sessions, action records, approvals, verification runs and session memory. Persist only redacted summaries, never Provider API keys. Make SessionRepository implement EventSink by translating appended events into redacted action or verification records. Expose createSession, appendAction, saveApproval, appendVerification, loadTimeline and clearSession. Make clearSession remove all records associated with one session.
-
-- [ ] **Step 4: Verify persistence**
-
-Run: npm test -- --run packages/persistence/src/redaction.test.ts packages/persistence/src/session-repository.test.ts
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-Run:
-
-~~~bash
-git add packages/persistence
-git commit -m "feat: persist redacted local session history"
-~~~
+**Final evidence:** Focused redaction/repository/error tests: 418/418; the six Task 9 persistence test files: 491/491; full workspace `npm test`: 26 files, 907 passed, 6 skipped. `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` each exited 0. Two independent final reviews reported Ready with 0 Critical, 0 Important, and 0 Minor findings; they rechecked raw and escaped token tails, comment-separated Bearer input, SQLite DB/journal/WAL/SHM bytes, and runtime error-code immutability. No provider, credential, network, push, PR, or merge was used.
 
 ### Task 10: Expose the local Fastify API and CLI
 

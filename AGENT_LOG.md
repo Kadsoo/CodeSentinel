@@ -1,5 +1,14 @@
 # AGENT_LOG
 
+## 2026-08-01 — TASK-010: Local API, CLI and integration delivery evidence
+
+- Branch: `feat/task10-api-cli`; all changes remain local. No push, PR, merge, real Provider, network, or credential service was used.
+- TDD RED/GREEN: Task 10 sections 1–8 are checked off in the plan; representative RED counts included config 2 failures, persistence 4 failures, Core stop 3 failures, Host profile 16 failures, runtime 13 failures, session service 7 failures, API missing-package failure, and CLI missing-package failure. Corrective RED tests covered compatibility, audit races, stale locks, approval consistency, and package boundaries.
+- Integration RED/GREEN: initial fixture ordering failed with `PERSISTENCE_FAILED`; an invalid feature-phase fixture produced `FEATURE_STAGE_INVALID`; the corrected controlled `test_repair` fixture passed. Final integration verifies API/Host/CLI/fake Provider composition, concurrent-create 409, stop idempotence, bounded timeline, `[REDACTED]` persistence, and sentinel absence from profiles, SQLite sidecar files, HTTP and CLI output.
+- Final verification: focused integration 16 files / 663 passed; full `npm test` 36 files / 1003 passed / 6 skipped; `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` exited 0. Child verification processes and Fastify/repository resources were closed in `finally`; no long-lived process remains.
+- Task 10 implementation commits include `75c8bf8`, `a736767`, `bff16dd`, `7e8b929`, `6c6b5cf`, `09a3af1`, `99eaf5d`, `e210185`, `8d97258`, `d4ad558`, `bb9ca7f`, `289a4d2`, `63b3eb4`, `6f38452`, `ac4e4e3`, `2265912`, `0795cd8`, and `583258d`.
+- Independent reviews: Task 1–8 specifications and quality reviews were compliant/Ready; the Task 9 final audit found no code C/I/M blockers after evidence was recorded.
+
 ## 2026-07-28T23:15:27+08:00 — SPEC-001：设计规约阶段
 
 - 触发技能：using-superpowers、brainstorming、writing-plans（计划尚未开始）。
@@ -111,3 +120,22 @@
 - 审查：独立规格、安全与质量审查先后提出并验证修复运行时私有字段、注入端口返回契约和构造参数错误泄露；最终复审均为 COMPLIANT。Mock 对恶意 Proxy 的反射副作用仍保守地作为测试输入边界。
 - 实际验证：Feature 分支和 GitHub 合并后的本地 `main` 均运行 `npm test`（12 文件、264 通过、3 跳过）、`npm run typecheck`、`npm run lint` 与 diff 检查并通过。
 - 发布：远程 `main` 与 `feat/task-7-providers` 已推送；PR #1 当前已合并。未推送或记录任何真实 Provider/凭据秘密。
+
+## 2026-07-30 — TASK-008：受控 Agent Loop
+
+- 隔离与状态：在 feat/task8-agent-loop 隔离分支完成，最终提交为 bb159d1，未推送。没有长驻进程；全部 test process 均已完成/退出。未调用真实 Provider、network 或 credentials。
+- TDD 事实：Task 8 feature-flow RED 的 8 个新用例中有 3 个失败，分别为缺 Expected stage、意外将 test GREEN 作为完成、以及 RED 后未转入 implementation。Task 8 approval-resume 的 Date 最大值/15min TTL 情形会错误创建 pending。命令绑定 repair RED 为 58 tests 中 1 failed（完成而非阻断）；feature RED 为 9 tests 中 1 failed（得到 FEATURE_STAGE_INVALID 而非 POLICY_DENIED）。
+- 后续补充两轮 mutation testing：额外的 verification event 会使期望 1 收到 2；改变 selected feature phase 码会失败；将 policy event 从 ALLOWED 改为 POLICY_DENIED 时，两条事件序列测试均失败。
+- 关键实施 commits：559a899、c036664、ad74f7e、dab1d0a、6cd0898、0e47fd7、bb159d1。
+- 独立审查：发现并修复 TTL Date upper-bound、selected verification command substitution 与 feature mismatch ordering。最终规格与质量审查均为 COMPLIANT；workspace 旧审查三项已复核为早已修复，无需改动。
+- 最终独立验证：npm test 为 19 files / 382 passed / 6 skipped；npm run typecheck、npm run lint，以及 git diff --check docs-task8-agent-loop-design...HEAD 均 exit 0。
+
+## 2026-07-31 — TASK-009：结构化脱敏持久化
+
+- 范围与隔离：在 `feat/task9-persistence` 本地 worktree 完成。交付 Harness 结构化审计事实、会话/有序时间线/Action/审批/验证/内存的 SQLite 持久化、会话级安全清除，以及中断会话与待审批项的恢复处理；不持久化原始 patch 或 API key。
+- TDD 事实：针对结构化赋值、转义片段、引号/注释/URL 边界、Bearer 边界、截断/幂等性、物理 SQLite 字节和错误契约先补 RED 用例。代表性 RED 为已知前缀转义尾部 3 项失败、注释分隔 Bearer 8 项失败、错误契约 1 项失败；随后以最小实现修复。
+- 脱敏边界：可可靠解析的合法语法仅替换敏感值并保留相邻安全文本；全局引号/转义无法可靠分段，或敏感候选无法安全解析时，整段输入替换为 `[REDACTED]`。DB、journal、WAL 和 SHM 均纳入字节扫描。
+- 错误与完整性：持久化错误码以不可写、不可配置的自有属性公开；repository 对 session/action/approval/verification/memory/recovery 的因果与顺序完整性 fail closed。
+- 最终检查：focused redaction/repository/error 为 418/418；六个 Task 9 persistence 测试文件为 491/491；全量 `npm test` 为 26 files、907 passed、6 skipped；`npm run typecheck`、`npm run lint`、`npm run build` 和 `git diff --check` 均 exit 0。
+- 独立复核：最终规格/质量和安全/错误契约两次复核均为 Ready，Critical/Important/Minor 均为 0；复验原始及 escaped token 尾部、注释分隔 Bearer、SQLite 全部旁文件字节，以及运行时错误码不可变性。
+- 本地提交：`7f9cc43` 至 `36fa320` 的 Task 9 提交均只在本地分支；未调用真实 Provider、network 或 credentials，未推送、创建 PR 或合并。
