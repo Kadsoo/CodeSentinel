@@ -465,7 +465,7 @@ Completed locally: the Windows-compatible trusted `node_npm_cli` launcher, bound
 - Create: packages/providers/src/credential-store.test.ts
 - Create: packages/providers/src/index.ts
 
-- [ ] **Step 1: Write failing provider and credential tests**
+- [x] **Step 1: Write failing provider and credential tests**
 
 ~~~ts
 import { describe, expect, it } from "vitest";
@@ -486,23 +486,23 @@ it("reports credential status without returning the secret", async () => {
 });
 ~~~
 
-- [ ] **Step 2: Run focused tests to record red**
+- [x] **Step 2: Run focused tests to record red**
 
 Run: npm test -- --run packages/providers/src/provider.test.ts packages/providers/src/credential-store.test.ts
 Expected: FAIL because provider and credential abstractions are missing.
 
-- [ ] **Step 3: Implement adapters with injected secrets**
+- [x] **Step 3: Implement adapters with injected secrets**
 
 Define Provider.complete(request) returning one unknown response that is parsed by contracts outside the Provider. Implement ScriptedMockProvider with finite scripted responses and an immutable requests array for feedback-loop assertions. Implement OpenAICompatibleProvider using fetch and a supplied API key, never logging the key. Define CredentialStore with set, get, status and clear. Use InMemoryCredentialStore only for tests and a keytar-backed Windows store only at CLI runtime.
 
-- [ ] **Step 4: Verify Provider isolation**
+- [x] **Step 4: Verify Provider isolation**
 
 Run: npm test -- --run packages/providers/src/provider.test.ts packages/providers/src/credential-store.test.ts
 Expected: PASS without network calls.
 Run: npm run typecheck
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run:
 
