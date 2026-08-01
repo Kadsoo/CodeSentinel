@@ -139,3 +139,10 @@
 - 最终检查：focused redaction/repository/error 为 418/418；六个 Task 9 persistence 测试文件为 491/491；全量 `npm test` 为 26 files、907 passed、6 skipped；`npm run typecheck`、`npm run lint`、`npm run build` 和 `git diff --check` 均 exit 0。
 - 独立复核：最终规格/质量和安全/错误契约两次复核均为 Ready，Critical/Important/Minor 均为 0；复验原始及 escaped token 尾部、注释分隔 Bearer、SQLite 全部旁文件字节，以及运行时错误码不可变性。
 - 本地提交：`7f9cc43` 至 `36fa320` 的 Task 9 提交均只在本地分支；未调用真实 Provider、network 或 credentials，未推送、创建 PR 或合并。
+
+## 2026-08-01 — SUBMISSION-MATERIALS：课程交付清单审计
+
+- 资料依据：`作业要求/通用要求.md` §4.7–§5 与 `AI4SE_Final_Project_A_Coding_Agent_Harness.md` §A.6–§A.7。
+- 审计结果：代码、`SPEC.md`、`PLAN.md`、`SPEC_PROCESS.md` 与 `AGENT_LOG.md` 已存在；根目录缺少 README、REFLECTION、`.gitlab-ci.yml`、GitHub Actions、分发配置和公开 WebUI 演示入口。
+- 计划：在隔离分支 `feat/submission-materials` 补齐材料，增加无凭据、无网络的 React Mock WebUI 和机制演示；真实 Provider、真实 Key、本地工作区和任意远程执行不进入公开演示。
+- 人工责任：`REFLECTION.md` 仅提供学生可编辑初稿，提交前必须由学生本人核对、重写并标注 AI 辅助润色；线上 URL 只有在 Pages 工作流实际发布后才记录。
