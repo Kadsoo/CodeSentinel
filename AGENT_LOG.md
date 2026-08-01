@@ -172,3 +172,10 @@
 - 触发：PR #4 的 Ubuntu `unit-test` 中 `packages/tools/src/verification.test.ts` 有 72 项失败，统一返回 `spawn_failed / VERIFICATION_LAUNCHER_UNAVAILABLE`；其余测试通过。
 - 根因：项目目标为 Windows x64，受控 runner 和测试按 Windows Node 布局解析 npm CLI；Ubuntu toolcache 使用 `lib/node_modules/npm` 布局，未满足当前安全解析契约。
 - 修正：经批准后将完整 `unit-test` job 改为 `windows-latest`；把 Docker 镜像构建拆为独立 Ubuntu `container-build` job，避免改变受控 launcher 的安全规则。
+
+## 2026-08-01 — CI-005：规范 Windows 临时目录的规范路径
+
+- 触发：新的 Windows PR 运行中 `verification.test.ts` 已全部通过，但 7 个 workspace 路径安全断言失败；失败日志显示 fixture 使用 `C:\Users\RUNNER~1\...` 短路径，而 `realpath()` 返回 `C:\Users\runneradmin\...` 长路径。
+- 根因：runner 继承的 `TEMP`/`TMP` 别名使测试 fixture 路径与规范路径不一致，依赖 fixture 字符串的竞态模拟因此没有触发。
+- 修正：在 Windows job 开始阶段将 `TEMP` 和 `TMP` 统一为 `USERPROFILE\AppData\Local\Temp` 的长路径；不修改路径校验实现或安全契约。
+- 验证：重新运行 Windows unit-test，确认 1,011 个 Vitest 用例、typecheck、lint 和 WebUI build 全部通过。
