@@ -788,8 +788,15 @@ git commit -m "chore: add distribution and CI delivery artifacts"
 - [x] Add deterministic React Mock WebUI and focused UI test — commit `30a383c`.
 - [x] Add offline mechanism demonstration and regression test — commit `26134cf`.
 - [x] Add GitHub Actions, `.gitlab-ci.yml` `unit-test`, Pages workflow, and static container recipe — commit `eb25700`.
-- [x] Add README and student-editable `REFLECTION.md` draft — pending final material commit.
-- [ ] Record a real passing CI/CD run and the published Pages URL before submission.
+- [x] Add README and student-editable `REFLECTION.md` draft — commit `66afe18`.
+- [x] Make the one-click test suite reproducible on shared runners — commits `93e93f8` and `4df599d`.
+- [ ] Record a real passing CI/CD run and the published Pages URL before submission; the Pages URL must be filled only after the workflow succeeds.
+
+The older Task 13 draft above described a larger distribution expansion. This
+submission follow-up supersedes it with the smaller, implemented `apps/web`
+Mock demo, mechanism script, Docker static image, and required CI files. A
+public service, arbitrary-code execution, and real credentials remain out of
+scope.
 
 ## Cold-start validation protocol
 

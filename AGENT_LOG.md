@@ -154,3 +154,13 @@
 - 交付配置：新增 GitHub Actions、课程要求的 `.gitlab-ci.yml`（含 `unit-test`）、GitHub Pages 静态发布工作流、静态演示 Dockerfile 与 `.dockerignore`。
 - 文档：新增 `README.md` 和 `REFLECTION.md` 初稿；README 明确区分本地 API 与公开 Mock 演示；反思必须由学生本人重写后提交。
 - 实现提交：WebUI `30a383c`；机制演示 `26134cf`；CI/Pages/容器 `eb25700`；材料计划 `b004ee0`。
+
+## 2026-08-01 — SUBMISSION-MATERIALS：本地最终验证与稳定性修正
+
+- 稳定性修正（提交 `93e93f8`、`4df599d`）：Vitest 设置 4 个 worker、15 秒测试/钩子超时；脱敏 65 KiB 墙钟压力用例使用与相邻用例一致的 500ms 环境容差；SQLite 外部锁测试将持锁时间从 1.5 秒延长到 4 秒，避免共享 runner 调度竞态。输出、安全断言和失败关闭语义未改变。
+- 干净安装：`npm ci --ignore-scripts --no-audit --no-fund` 成功安装 300 个包；仅有已存在的 `whatwg-encoding` 弃用警告。
+- 本地验证：`npm test` 为 38 个文件、1005 passed、6 skipped；`npm run typecheck`、`npm run build`、`npm run lint`、`npm run web:build` 和 `npm run demo:mechanisms` 均通过；机制演示输出 deny/feedback/approval 三条稳定证据。
+- 材料检查：所需 `SPEC.md`、`PLAN.md`、`SPEC_PROCESS.md`、`AGENT_LOG.md`、`README.md`、`REFLECTION.md`、`.gitlab-ci.yml`、GitHub Actions、Dockerfile 均存在；反思初稿 2361 字符，提交前仍由学生本人核对、重写并标注 AI 辅助范围。
+- 安全扫描：无受跟踪 `.env` 文件；私钥、长 `ghp_`/`sk-` 模式命中 0；演示不读取真实凭据、不连接 Provider、不运行工作区代码。
+- 分发边界：已修正 Dockerfile 中不存在的根级 Vite 配置引用。`docker build` 未能执行，因为本机 Docker Desktop Linux daemon 未启动（`dockerDesktopLinuxEngine` pipe 不存在）；未启动或停止任何本任务长驻进程。
+- 线上状态：GitHub Actions CI 与 Pages 尚未以本分支实际运行，故没有虚构 pass 记录或 Pages URL；合并并成功发布后再把真实 URL 写入 README 和提交材料。
